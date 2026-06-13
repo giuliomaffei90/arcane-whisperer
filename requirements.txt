@@ -1,0 +1,10 @@
+pyobjc-framework-Cocoa>=12.2
+pyobjc-framework-AVFoundation>=12.2
+pyobjc-framework-Speech>=12.2
+faster-whisper>=1.2.1
+numpy>=2.4.6
+sounddevice>=0.5.5
+beautifulsoup4>=4.15.0
+requests>=2.34.2
+ddgs>=9.9.2
+json5>=0.14.0
