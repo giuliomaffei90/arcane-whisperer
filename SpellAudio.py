@@ -12,6 +12,7 @@ import argparse
 import json
 import multiprocessing
 import queue
+import random
 import re
 import sys
 import threading
@@ -32,6 +33,7 @@ try:
         NSBackingStoreBuffered,
         NSBezierPath,
         NSColor,
+        NSCursor,
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
@@ -49,6 +51,8 @@ try:
         NSTrackingArea,
         NSTrackingInVisibleRect,
         NSTrackingMouseEnteredAndExited,
+        NSTrackingMouseMoved,
+        NSTextView,
         NSVariableStatusItemLength,
         NSView,
         NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -262,6 +266,29 @@ def component_material(components: str) -> str:
     return material
 
 
+DICE_PATTERN = re.compile(r"\b(\d+)d(\d+)\b", flags=re.I)
+
+
+def dice_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
+    return [(match.start(), match.end() - match.start(), match.group(0)) for match in DICE_PATTERN.finditer(body)]
+
+
+def roll_dice_expression(expression: str) -> str:
+    match = DICE_PATTERN.fullmatch(expression.strip())
+    if not match:
+        raise ValueError(f"Invalid dice expression: {expression}")
+
+    count = int(match.group(1))
+    sides = int(match.group(2))
+    if count < 1 or count > 100 or sides < 2 or sides > 1000:
+        raise ValueError(f"Unsupported dice expression: {expression}")
+
+    rolls = [random.randint(1, sides) for _ in range(count)]
+    total = sum(rolls)
+    roll_details = ", ".join(str(value) for value in rolls)
+    return f"Rolled {expression}: {total} ({roll_details})"
+
+
 def attributed_spell_body(body: str):
     dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
     attributes = {
@@ -278,7 +305,7 @@ def attributed_spell_body(body: str):
             NSMakeRange(marker_start, len(marker)),
         )
 
-    for match in re.finditer(r"\b\d+d\d+\b", body, flags=re.I):
+    for match in DICE_PATTERN.finditer(body):
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
             dice_color,
@@ -316,6 +343,78 @@ class CheckboxSquareView(NSView):
 class FlippedView(NSView):
     def isFlipped(self):
         return True
+
+
+class DiceTextView(NSTextView):
+    dice_ranges: list[tuple[int, int, str]]
+    roll_target: Any
+    tracking_area: Any
+
+    def initWithFrame_(self, frame):
+        self = objc.super(DiceTextView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.dice_ranges = []
+        self.roll_target = None
+        self.tracking_area = None
+        self.setEditable_(False)
+        self.setSelectable_(False)
+        self.setDrawsBackground_(False)
+        self.setTextContainerInset_(NSMakeSize(0, 0))
+        self.setHorizontallyResizable_(False)
+        self.setVerticallyResizable_(True)
+        self.textContainer().setLineFragmentPadding_(0)
+        return self
+
+    def setDiceRanges_(self, dice_ranges):
+        self.dice_ranges = list(dice_ranges)
+
+    def setRollTarget_(self, target):
+        self.roll_target = target
+
+    def updateTrackingAreas(self):
+        if self.tracking_area is not None:
+            self.removeTrackingArea_(self.tracking_area)
+        self.tracking_area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            self.bounds(),
+            NSTrackingMouseMoved
+            | NSTrackingMouseEnteredAndExited
+            | NSTrackingActiveAlways
+            | NSTrackingInVisibleRect,
+            self,
+            None,
+        )
+        self.addTrackingArea_(self.tracking_area)
+        objc.super(DiceTextView, self).updateTrackingAreas()
+
+    def diceExpressionAtEvent_(self, event):
+        point = self.convertPoint_fromView_(event.locationInWindow(), None)
+        index = self.characterIndexForInsertionAtPoint_(point)
+        for start, length, expression in self.dice_ranges:
+            if start <= index < start + length:
+                return expression
+        return None
+
+    def mouseMoved_(self, event):
+        if self.diceExpressionAtEvent_(event) is not None:
+            NSCursor.pointingHandCursor().set()
+        else:
+            NSCursor.arrowCursor().set()
+
+    def mouseExited_(self, _event):
+        NSCursor.arrowCursor().set()
+
+    def mouseDown_(self, event):
+        expression = self.diceExpressionAtEvent_(event)
+        if expression is not None:
+            if self.roll_target is not None:
+                self.roll_target.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "rollDice:",
+                    expression,
+                    False,
+                )
+            return
+        objc.super(DiceTextView, self).mouseDown_(event)
 
 
 def contextual_strings_for_spells(spells: list[Spell]) -> list[str]:
@@ -418,7 +517,7 @@ def make_label(text: str, frame: tuple[int, int, int, int], size: float, bold: b
     label.setTextColor_(NSColor.whiteColor())
     label.setDrawsBackground_(False)
     label.setEditable_(False)
-    label.setSelectable_(True)
+    label.setSelectable_(False)
     label.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
     return label
 
@@ -434,9 +533,10 @@ class OverlayController(NSObject):
     title_label: NSTextField
     italian_name_label: NSTextField
     meta_label: NSTextField
+    dice_result_label: NSTextField
     scroll_view: NSScrollView
     scroll_content: FlippedView
-    body_label: NSTextField
+    body_label: DiceTextView
     components_label: NSTextField
     component_material_label: NSTextField
     range_label: NSTextField
@@ -500,15 +600,22 @@ class OverlayController(NSObject):
         self.meta_label = make_multiline(make_label("Say the name of a configured spell.", (24, 392, 592, 42), 13))
         self.meta_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0))
 
-        self.scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(24, 24, 592, 356))
+        self.dice_result_label = make_label("", (24, 364, 592, 20), 12, True)
+        self.dice_result_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0))
+        self.dice_result_label.setHidden_(True)
+
+        self.scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(24, 24, 592, 332))
         self.scroll_view.setHasVerticalScroller_(True)
         self.scroll_view.setAutohidesScrollers_(False)
         self.scroll_view.setDrawsBackground_(False)
         self.scroll_view.setBorderType_(0)
-        self.scroll_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 592, 356))
+        self.scroll_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 592, 332))
         self.scroll_view.setDocumentView_(self.scroll_content)
 
-        self.body_label = make_multiline(make_label("", (0, 0, 560, 278), 14))
+        self.body_label = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 278))
+        self.body_label.setFont_(NSFont.systemFontOfSize_(14))
+        self.body_label.setTextColor_(NSColor.whiteColor())
+        self.body_label.setRollTarget_(self)
 
         self.components_label = make_label("Components:", (0, 0, 100, 24), 14)
         self.v_label = make_label("V", (112, 0, 18, 24), 14)
@@ -539,6 +646,7 @@ class OverlayController(NSObject):
         content.addSubview_(self.title_label)
         content.addSubview_(self.italian_name_label)
         content.addSubview_(self.meta_label)
+        content.addSubview_(self.dice_result_label)
         content.addSubview_(self.scroll_view)
         self.scroll_content.addSubview_(self.body_label)
         for view in self.detail_views:
@@ -578,7 +686,7 @@ class OverlayController(NSObject):
 
     def _layout_spell_details(self, attributed_body):
         body_width = 560
-        scroll_height = 356
+        scroll_height = 332
         gap = 14
         rect = attributed_body.boundingRectWithSize_options_(
             NSMakeSize(body_width, 10000),
@@ -610,10 +718,13 @@ class OverlayController(NSObject):
     def showMessage_meta_body_(self, title: str, meta: str, body: str):
         self.title_label.setStringValue_(title)
         self.italian_name_label.setStringValue_("")
+        self.dice_result_label.setStringValue_("")
+        self.dice_result_label.setHidden_(True)
         self.meta_label.setStringValue_(meta)
-        self.body_label.setStringValue_(body)
-        self.scroll_content.setFrame_(NSMakeRect(0, 0, 592, 356))
-        self.body_label.setFrame_(NSMakeRect(0, 0, 560, 356))
+        self.body_label.setString_(body)
+        self.body_label.setDiceRanges_([])
+        self.scroll_content.setFrame_(NSMakeRect(0, 0, 592, 332))
+        self.body_label.setFrame_(NSMakeRect(0, 0, 560, 332))
         self._set_detail_controls_hidden(True)
         self.panel.orderFrontRegardless()
 
@@ -628,15 +739,19 @@ class OverlayController(NSObject):
         title, meta, body = format_spell_for_overlay(spell)
         flags = component_flags(spell.components)
         attributed_body = attributed_spell_body(body)
+        dice_ranges = dice_ranges_for_body(body)
 
         self.title_label.setStringValue_(title)
+        self.dice_result_label.setStringValue_("")
+        self.dice_result_label.setHidden_(True)
         italian_name = spell.italian_name.strip()
         if italian_name and normalize(italian_name) != normalize(spell.name):
             self.italian_name_label.setStringValue_(f"({italian_name})")
         else:
             self.italian_name_label.setStringValue_("")
         self.meta_label.setStringValue_(meta)
-        self.body_label.setAttributedStringValue_(attributed_body)
+        self.body_label.textStorage().setAttributedString_(attributed_body)
+        self.body_label.setDiceRanges_(dice_ranges)
         self._layout_spell_details(attributed_body)
         self.v_box.setChecked_(flags["V"])
         self.s_box.setChecked_(flags["S"])
@@ -649,6 +764,15 @@ class OverlayController(NSObject):
         self._set_detail_controls_hidden(False)
         self.panel.orderFrontRegardless()
         self._schedule_hide_timer()
+
+    def rollDice_(self, expression: str):
+        try:
+            result = roll_dice_expression(str(expression))
+        except ValueError as exc:
+            result = str(exc)
+        self.dice_result_label.setStringValue_(result)
+        self.dice_result_label.setHidden_(False)
+        self.panel.orderFrontRegardless()
 
     def hide_(self, _timer):
         self.timer = None
@@ -1400,6 +1524,9 @@ class AppDelegate(NSObject):
     def applicationWillTerminate_(self, _notification):
         if self.listener is not None and hasattr(self.listener, "stopRecognition"):
             self.listener.stopRecognition()
+
+    def applicationShouldTerminateAfterLastWindowClosed_(self, _sender):
+        return False
 
     def quit_(self, _sender):
         if self.listener is not None and hasattr(self.listener, "stopRecognition"):
