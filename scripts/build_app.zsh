@@ -17,11 +17,18 @@ if [ ! -x ".venv/bin/python" ]; then
   "$PYTHON_BIN" -m venv .venv
 fi
 
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt pyinstaller
+if [ -f requirements.lock.txt ]; then
+  .venv/bin/python -m pip install -r requirements.lock.txt
+else
+  .venv/bin/python -m pip install --upgrade pip
+  .venv/bin/python -m pip install -r requirements.txt pyinstaller
+fi
 
 if [ -z "$MODEL_DIR" ]; then
-  MODEL_DIR="$(find "$MODEL_CACHE" -maxdepth 2 -name model.bin -path '*faster-whisper-base*' -print -quit 2>/dev/null | xargs dirname)"
+  MODEL_BIN="$(find "$MODEL_CACHE" -maxdepth 2 -name model.bin -path '*faster-whisper-base*' -print -quit 2>/dev/null || true)"
+  if [ -n "$MODEL_BIN" ]; then
+    MODEL_DIR="$(dirname "$MODEL_BIN")"
+  fi
 fi
 
 if [ -z "$MODEL_DIR" ] || [ ! -f "$MODEL_DIR/model.bin" ]; then

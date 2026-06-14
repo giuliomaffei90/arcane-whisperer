@@ -100,6 +100,12 @@ BASE_DIR = resource_base_dir()
 DEFAULT_SPELLS_FILE = bundled_resource_path("spells.json")
 LOG_FILE = Path.home() / "Library" / "Logs" / "Arcane Whisperer" / "arcane_whisperer.log"
 APP_RETAINED_OBJECTS: list[Any] = []
+MAX_SPELL_FILE_BYTES = 12 * 1024 * 1024
+MAX_SPELLS = 2500
+MAX_TEXT_FIELD_CHARS = 50000
+MAX_SHORT_FIELD_CHARS = 500
+MAX_ALIAS_CHARS = 140
+MAX_ALIASES_PER_SPELL = 80
 
 
 def normalize(text: str) -> str:
@@ -110,6 +116,29 @@ def normalize(text: str) -> str:
     for char in ascii_text:
         cleaned.append(char if char.isalnum() else " ")
     return " ".join("".join(cleaned).split())
+
+
+def clean_text(value: Any, max_chars: int = MAX_SHORT_FIELD_CHARS) -> str:
+    """Convert untrusted JSON values to safe, bounded display text."""
+    if value is None:
+        return ""
+    text = str(value)
+    text = "".join(char for char in text if char in "\n\t" or not unicodedata.category(char).startswith("C"))
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def clean_text_list(values: Any, max_items: int, max_chars: int) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        return ()
+    cleaned = []
+    for value in values[:max_items]:
+        text = clean_text(value, max_chars)
+        if text:
+            cleaned.append(text)
+    return tuple(dict.fromkeys(cleaned))
 
 
 @dataclass(frozen=True)
@@ -131,44 +160,58 @@ class Spell:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Spell":
-        names = raw.get("names", {})
-        aliases = list(raw.get("aliases", []))
+        if not isinstance(raw, dict):
+            raise ValueError("Spell entries must be JSON objects.")
+
+        raw_names = raw.get("names", {})
+        names = raw_names if isinstance(raw_names, dict) else {}
+        aliases = list(clean_text_list(raw.get("aliases", []), MAX_ALIASES_PER_SPELL, MAX_ALIAS_CHARS))
         for value in (raw.get("name"), names.get("en"), names.get("it")):
             if value:
-                aliases.append(str(value))
+                aliases.append(clean_text(value, MAX_ALIAS_CHARS))
 
-        visible_name = raw.get("name") or names.get("it") or names.get("en")
+        visible_name = clean_text(raw.get("name") or names.get("it") or names.get("en"), MAX_SHORT_FIELD_CHARS)
         if not visible_name:
             raise ValueError(f"Spell entry without a name: {raw!r}")
 
         return cls(
-            id=str(raw.get("id") or normalize(visible_name).replace(" ", "-")),
-            name=str(visible_name),
-            italian_name=str(names.get("it", "")),
+            id=clean_text(raw.get("id") or normalize(visible_name).replace(" ", "-"), MAX_SHORT_FIELD_CHARS),
+            name=visible_name,
+            italian_name=clean_text(names.get("it", ""), MAX_SHORT_FIELD_CHARS),
             aliases=tuple(dict.fromkeys(a.strip() for a in aliases if a.strip())),
-            level=str(raw.get("level", "")),
-            school=str(raw.get("school", "")),
-            casting_time=str(raw.get("casting_time", "")),
-            range=str(raw.get("range", "")),
-            components=str(raw.get("components", "")),
-            duration=str(raw.get("duration", "")),
-            description=str(raw.get("description", "")),
-            higher_levels=str(raw.get("higher_levels", "")),
-            spell_lists=tuple(str(item) for item in raw.get("spell_lists", []) if str(item).strip()),
-            source=str(raw.get("source", "")),
+            level=clean_text(raw.get("level", ""), MAX_SHORT_FIELD_CHARS),
+            school=clean_text(raw.get("school", ""), MAX_SHORT_FIELD_CHARS),
+            casting_time=clean_text(raw.get("casting_time", ""), MAX_SHORT_FIELD_CHARS),
+            range=clean_text(raw.get("range", ""), MAX_SHORT_FIELD_CHARS),
+            components=clean_text(raw.get("components", ""), MAX_SHORT_FIELD_CHARS),
+            duration=clean_text(raw.get("duration", ""), MAX_SHORT_FIELD_CHARS),
+            description=clean_text(raw.get("description", ""), MAX_TEXT_FIELD_CHARS),
+            higher_levels=clean_text(raw.get("higher_levels", ""), MAX_TEXT_FIELD_CHARS),
+            spell_lists=clean_text_list(raw.get("spell_lists", []), 40, MAX_SHORT_FIELD_CHARS),
+            source=clean_text(raw.get("source", ""), MAX_SHORT_FIELD_CHARS),
         )
 
 
 def load_spells(path: Path) -> tuple[list[Spell], dict[str, Spell]]:
+    path = path.expanduser()
     if not path.exists():
         raise FileNotFoundError(f"Spell file not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Spell path is not a regular file: {path}")
+    if path.stat().st_size > MAX_SPELL_FILE_BYTES:
+        raise ValueError(f"Spell file is too large: {path}")
 
     with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+        try:
+            payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid spell JSON: {exc}") from exc
 
-    raw_spells = payload.get("spells", payload)
+    raw_spells = payload.get("spells", payload) if isinstance(payload, dict) else payload
     if not isinstance(raw_spells, list):
         raise ValueError("Spell file must contain a list or an object with a 'spells' list.")
+    if len(raw_spells) > MAX_SPELLS:
+        raise ValueError(f"Spell file contains too many entries: {len(raw_spells)}")
 
     spells = [Spell.from_dict(item) for item in raw_spells]
     lookup: dict[str, Spell] = {}
@@ -348,13 +391,18 @@ def whisper_prompt_for_spells(spell_names: list[str]) -> str:
     )
 
 
-def log(message: str):
+def log(message: str, persist: bool = True):
     line = f"[Arcane Whisperer] {message}"
     print(line, flush=True)
+    if not persist:
+        return
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not LOG_FILE.exists():
+            LOG_FILE.touch(mode=0o600)
         with LOG_FILE.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+        LOG_FILE.chmod(0o600)
     except OSError:
         pass
 
@@ -774,7 +822,7 @@ class WhisperSpellListener:
         language = getattr(info, "language", "?")
         probability = getattr(info, "language_probability", 0.0)
         if self.debug:
-            log(f"TRANSCRIBED [{language} {probability:.2f}]: {text}")
+            log(f"TRANSCRIBED [{language} {probability:.2f}]: {text}", persist=False)
 
         spell = find_spell_in_text(text, self.spell_lookup)
         if spell is None:
@@ -786,7 +834,7 @@ class WhisperSpellListener:
 
         self.last_spell_id = spell.id
         self.last_spell_at = now
-        log(f"Spell found: {spell.name} from Whisper {language!r}: {text!r}")
+        log(f"Spell found: {spell.name} from Whisper language={language!r}.")
         self.overlay.performSelectorOnMainThread_withObject_waitUntilDone_("showSpell:", spell, False)
 
     def showStatus_(self, title: str, meta: str, body: str):
@@ -1004,7 +1052,7 @@ class SpeechSpellListener(NSObject):
                 if result is not None:
                     text = str(result.bestTranscription().formattedString())
                     if self.debug:
-                        log(f"Transcribed [{locale_identifier}]: {text}")
+                        log(f"Transcribed [{locale_identifier}]: {text}", persist=False)
                     self.handleTranscript_(text)
 
                 if error is not None:
@@ -1191,7 +1239,7 @@ class SpeechSpellListener(NSObject):
 
         self.last_spell_id = spell.id
         self.last_spell_at = now
-        log(f"Spell found: {spell.name} from transcript {transcript!r}")
+        log(f"Spell found: {spell.name} from Speech transcript.")
         self.performSelectorOnMainThread_withObject_waitUntilDone_("showSpell:", spell, False)
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "resetAfterSpell:",

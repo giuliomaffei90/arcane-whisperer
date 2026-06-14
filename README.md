@@ -28,6 +28,8 @@ Arcane Whisperer.zip
 
 For GitHub distribution, attach `Arcane Whisperer.zip` to a GitHub Release instead of committing it to the repository.
 
+Security hardening notes live in [SECURITY.md](SECURITY.md). The build uses `requirements.lock.txt` when present so packaged releases are not rebuilt against surprise dependency versions.
+
 ## Launch
 
 Recommended:
