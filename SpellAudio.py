@@ -74,6 +74,7 @@ try:
         NSWindowCollectionBehaviorFullScreenAuxiliary,
         NSWindowStyleMaskBorderless,
         NSWindowStyleMaskClosable,
+        NSWindowStyleMaskMiniaturizable,
         NSWindowStyleMaskResizable,
         NSWindowStyleMaskTitled,
         NSWindowStyleMaskUtilityWindow,
@@ -606,14 +607,35 @@ def creature_summary(creature: Creature) -> str:
     return f"{creature.name}   HP: {creature.hp}   AC: {display_ac(creature.ac)}   CR: {creature.cr}"
 
 
-def search_creatures(query: str, creatures: list[Creature], limit: int = 8) -> list[Creature]:
+def cr_sort_value(value: str) -> float:
+    text = clean_text(value, MAX_SHORT_FIELD_CHARS)
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        try:
+            return float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 999.0
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 999.0
+
+
+def creature_cr_values(creatures: list[Creature]) -> list[str]:
+    values = {creature.cr for creature in creatures if creature.cr}
+    return sorted(values, key=lambda value: (cr_sort_value(value), value))
+
+
+def search_creatures(query: str, creatures: list[Creature], cr_filter: str | None = None, limit: int | None = None) -> list[Creature]:
+    filtered_creatures = [creature for creature in creatures if not cr_filter or creature.cr == cr_filter]
     normalized_query = normalize(query)
     if not normalized_query:
-        return creatures[:limit]
+        results = sorted(filtered_creatures, key=lambda creature: normalize(creature.name))
+        return results if limit is None else results[:limit]
 
-    ranked: list[tuple[float, str, Creature]] = []
+    matched: list[Creature] = []
     compact_query = normalized_query.replace(" ", "")
-    for creature in creatures:
+    for creature in filtered_creatures:
         normalized_name = normalize(creature.name)
         compact_name = normalized_name.replace(" ", "")
         if normalized_name == normalized_query:
@@ -627,9 +649,9 @@ def search_creatures(query: str, creatures: list[Creature], limit: int = 8) -> l
         else:
             score = SequenceMatcher(None, normalized_query, normalized_name).ratio() * 0.78
         if score >= 0.45:
-            ranked.append((score, creature.name, creature))
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    return [creature for _score, _name, creature in ranked[:limit]]
+            matched.append(creature)
+    matched.sort(key=lambda creature: normalize(creature.name))
+    return matched if limit is None else matched[:limit]
 
 
 def format_spell_for_overlay(spell: Spell) -> tuple[str, str, str]:
@@ -2051,18 +2073,24 @@ class SearchResultButton(NSButton):
         meta_attrs = text_attributes(12.5, muted, True)
         hp_text = self.hp_text.replace("HP ", "HP: ")
         ac_text = self.ac_text.replace("AC ", "AC: ")
+        cr_text = self.cr_text.replace("CR ", "CR: ")
         ac_width = text_width(ac_text, meta_attrs)
         hp_width = text_width(hp_text, meta_attrs)
-        gap = 8
+        cr_width = text_width(cr_text, meta_attrs)
+        gap = 6
         x = 14
         y = max(0, (bounds.size.height - 19) / 2 - 1)
-        metadata_width = hp_width + ac_width + gap * 2
+        metadata_width = hp_width + ac_width + cr_width + gap * 3
         name_width = max(54, width - x * 2 - metadata_width)
         fitted_name = fit_text_to_width(self.primary_text, name_width, name_attrs)
         NSString.stringWithString_(fitted_name).drawInRect_withAttributes_(NSMakeRect(x, y, name_width, 20), name_attrs)
         meta_x = x + min(name_width, text_width(fitted_name, name_attrs)) + gap
         NSString.stringWithString_(hp_text).drawInRect_withAttributes_(NSMakeRect(meta_x, y + 1, hp_width, 19), meta_attrs)
         NSString.stringWithString_(ac_text).drawInRect_withAttributes_(NSMakeRect(meta_x + hp_width + gap, y + 1, ac_width, 19), meta_attrs)
+        NSString.stringWithString_(cr_text).drawInRect_withAttributes_(
+            NSMakeRect(meta_x + hp_width + ac_width + gap * 2, y + 1, cr_width, 19),
+            meta_attrs,
+        )
 
     def _drawSpellResult_(self, bounds):
         width = bounds.size.width
@@ -2175,15 +2203,16 @@ class RowAddButton(NSButton):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
         icon_color = ui_color(0.96, 0.96, 0.97, 1.0) if highlighted else ui_color(0.78, 0.78, 0.80, 1.0)
-        if highlighted:
-            side = min(30, bounds.size.width, bounds.size.height)
-            draw_rounded_rect(
-                NSMakeRect((bounds.size.width - side) / 2, (bounds.size.height - side) / 2, side, side),
-                ui_color(0.14, 0.14, 0.15, 1.0),
-                ui_color(0.30, 0.30, 0.32, 1.0),
-                side / 2,
-                1,
-            )
+        fill = ui_color(0.155, 0.155, 0.168, 1.0) if highlighted else ui_color(0.13, 0.13, 0.14, 1.0)
+        stroke = ui_color(0.33, 0.33, 0.36, 1.0) if highlighted else ui_color(0.24, 0.24, 0.25, 1.0)
+        side = min(30, bounds.size.width, bounds.size.height)
+        draw_rounded_rect(
+            NSMakeRect((bounds.size.width - side) / 2, (bounds.size.height - side) / 2, side, side),
+            fill,
+            stroke,
+            8,
+            1,
+        )
         attributes = text_attributes(16, icon_color, True)
         glyph = NSString.stringWithString_("+")
         glyph_size = glyph.sizeWithAttributes_(attributes)
@@ -2548,7 +2577,10 @@ class MainWindowController(NSObject):
     notes_view: NSTextView
     monster_label: NSTextField
     monster_search_field: NSTextField
+    monster_cr_filter_popup: NSPopUpButton
     monster_search_button: NSButton
+    monster_results_scroll: NSScrollView
+    monster_results_content: FlippedView
     monster_result_buttons: list[NSButton]
     monster_add_buttons: list[NSButton]
     spell_search_field: NSTextField
@@ -2630,14 +2662,17 @@ class MainWindowController(NSObject):
         self.monster_sheet_combatant_index = -1
 
         screen = NSScreen.mainScreen().visibleFrame()
-        width = 1280
-        height = 760
-        x = screen.origin.x + (screen.size.width - width) / 2
-        y = screen.origin.y + (screen.size.height - height) / 2
+        width = int(screen.size.width)
+        height = int(screen.size.height)
 
-        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+        style = (
+            NSWindowStyleMaskTitled
+            | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskMiniaturizable
+            | NSWindowStyleMaskResizable
+        )
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, width, height),
+            NSMakeRect(screen.origin.x, screen.origin.y, width, height),
             style,
             NSBackingStoreBuffered,
             False,
@@ -2770,21 +2805,21 @@ class MainWindowController(NSObject):
         self.monster_search_field.setAction_("searchMonsters:")
         self.monster_search_field.setDelegate_(self)
         style_text_input(self.monster_search_field)
+        self.monster_cr_filter_popup = StyledPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 28))
+        self.monster_cr_filter_popup.addItemWithTitle_("Any CR")
+        for cr_value in creature_cr_values(self.creatures):
+            self.monster_cr_filter_popup.addItemWithTitle_(f"CR {cr_value}")
+        self.monster_cr_filter_popup.setTarget_(self)
+        self.monster_cr_filter_popup.setAction_("searchMonsters:")
         self.monster_search_button = self._make_button("Search", (0, 0, 80, 26), "searchMonsters:")
         self.monster_search_button.setHidden_(True)
-
-        for index in range(8):
-            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, MONSTER_RESULT_ROW_HEIGHT))
-            button.setTag_(index)
-            button.setHidden_(True)
-            self.monster_result_buttons.append(button)
-            add_button = RowAddButton.alloc().initWithFrame_(NSMakeRect(0, 0, 28, MONSTER_RESULT_ROW_HEIGHT))
-            add_button.setTarget_(self)
-            add_button.setAction_("addMonster:")
-            add_button.setTag_(index)
-            add_button.setHidden_(True)
-            add_button.setToolTip_("Add creature to initiative")
-            self.monster_add_buttons.append(add_button)
+        self.monster_results_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
+        self.monster_results_scroll.setHasVerticalScroller_(True)
+        self.monster_results_scroll.setAutohidesScrollers_(False)
+        self.monster_results_scroll.setDrawsBackground_(False)
+        self.monster_results_scroll.setBorderType_(0)
+        self.monster_results_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
+        self.monster_results_scroll.setDocumentView_(self.monster_results_content)
 
         self.spell_search_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 28))
         self.spell_search_field.setPlaceholderString_("Search spells in English or Italian")
@@ -2887,7 +2922,9 @@ class MainWindowController(NSObject):
             self.party_status_label,
             self.monster_label,
             self.monster_search_field,
+            self.monster_cr_filter_popup,
             self.monster_search_button,
+            self.monster_results_scroll,
         ):
             self.sidebar_content.addSubview_(view)
         for label in self.party_member_labels:
@@ -2901,10 +2938,6 @@ class MainWindowController(NSObject):
         ):
             for label in labels:
                 self.sidebar_content.addSubview_(label)
-        for button in self.monster_result_buttons:
-            self.sidebar_content.addSubview_(button)
-        for button in self.monster_add_buttons:
-            self.sidebar_content.addSubview_(button)
         for view in (
             self.tracker_title,
             self.previous_turn_button,
@@ -3015,7 +3048,7 @@ class MainWindowController(NSObject):
         visible_party_rows = min(len([character for character in characters if isinstance(character, dict)]), len(self.party_member_labels))
         sidebar_document_height = max(
             content_height,
-            430 + visible_party_rows * 42 + len(self.monster_result_buttons) * MONSTER_RESULT_ROW_STEP,
+            620 + visible_party_rows * 42,
         )
 
         self.sidebar_panel.setFrame_(NSMakeRect(0, 0, sidebar_width, content_height))
@@ -3091,18 +3124,26 @@ class MainWindowController(NSObject):
         y -= 70
         self.monster_label.setFrame_(NSMakeRect(sidebar_margin, y + 4, 140, 24))
         y -= 40
-        self.monster_search_field.setFrame_(NSMakeRect(sidebar_margin, y - 3, card_width, 34))
+        cr_filter_w = 90
+        cr_filter_gap = 10
+        search_w = max(160, card_width - cr_filter_w - cr_filter_gap)
+        self.monster_search_field.setFrame_(NSMakeRect(sidebar_margin, y - 3, search_w, 34))
+        self.monster_cr_filter_popup.setFrame_(NSMakeRect(sidebar_margin + search_w + cr_filter_gap, y - 3, cr_filter_w, 34))
         self.monster_search_button.setFrame_(NSMakeRect(sidebar_margin + card_width - 76, y, 76, 28))
-        y -= 52
-        monster_add_w = 22
+        y -= 48
+        results_height = max(140, y - 18)
+        self.monster_results_scroll.setFrame_(NSMakeRect(sidebar_margin, 18, card_width, results_height))
+        monster_add_w = 30
         monster_result_gap = 10
-        monster_result_w = max(180, card_width - monster_add_w - monster_result_gap)
+        monster_result_w = max(180, card_width - monster_add_w - monster_result_gap - 18)
+        results_document_height = max(results_height, len(self.monster_results) * MONSTER_RESULT_ROW_STEP)
+        self.monster_results_content.setFrame_(NSMakeRect(0, 0, card_width - 18, results_document_height))
         for index, button in enumerate(self.monster_result_buttons):
-            row_y = y - index * MONSTER_RESULT_ROW_STEP
-            button.setFrame_(NSMakeRect(sidebar_margin, row_y, monster_result_w, MONSTER_RESULT_ROW_HEIGHT))
+            row_y = index * MONSTER_RESULT_ROW_STEP
+            button.setFrame_(NSMakeRect(0, row_y, monster_result_w, MONSTER_RESULT_ROW_HEIGHT))
             if index < len(self.monster_add_buttons):
                 self.monster_add_buttons[index].setFrame_(
-                    NSMakeRect(sidebar_margin + monster_result_w + monster_result_gap, row_y, monster_add_w, MONSTER_RESULT_ROW_HEIGHT)
+                    NSMakeRect(monster_result_w + monster_result_gap, row_y, monster_add_w, MONSTER_RESULT_ROW_HEIGHT)
                 )
         top_scroll_y = max(0, sidebar_document_height - content_height)
         self.sidebar_scroll.contentView().scrollToPoint_(NSMakePoint(0, top_scroll_y))
@@ -3662,9 +3703,35 @@ class MainWindowController(NSObject):
         self.round_number = 1
         self.refreshTracker()
 
+    def selectedMonsterCrFilter(self) -> str | None:
+        selected = self.monster_cr_filter_popup.selectedItem()
+        title = str(selected.title()) if selected is not None else ""
+        if not title or title == "Any CR":
+            return None
+        return title.removeprefix("CR ").strip() or None
+
+    def ensureMonsterResultRows_(self, count: int):
+        while len(self.monster_result_buttons) < count:
+            index = len(self.monster_result_buttons)
+            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, MONSTER_RESULT_ROW_HEIGHT))
+            button.setTag_(index)
+            button.setHidden_(True)
+            self.monster_result_buttons.append(button)
+            self.monster_results_content.addSubview_(button)
+
+            add_button = RowAddButton.alloc().initWithFrame_(NSMakeRect(0, 0, 28, MONSTER_RESULT_ROW_HEIGHT))
+            add_button.setTarget_(self)
+            add_button.setAction_("addMonster:")
+            add_button.setTag_(index)
+            add_button.setHidden_(True)
+            add_button.setToolTip_("Add creature to initiative")
+            self.monster_add_buttons.append(add_button)
+            self.monster_results_content.addSubview_(add_button)
+
     def searchMonsters_(self, _sender):
         query = str(self.monster_search_field.stringValue()).strip()
-        self.monster_results = search_creatures(query, self.creatures, len(self.monster_result_buttons))
+        self.monster_results = search_creatures(query, self.creatures, self.selectedMonsterCrFilter())
+        self.ensureMonsterResultRows_(len(self.monster_results))
         for index, button in enumerate(self.monster_result_buttons):
             add_button = self.monster_add_buttons[index] if index < len(self.monster_add_buttons) else None
             if index >= len(self.monster_results):
@@ -3676,6 +3743,10 @@ class MainWindowController(NSObject):
             button.setHidden_(False)
             if add_button is not None:
                 add_button.setHidden_(False)
+        if self.monster_results_scroll is not None:
+            self.layoutMainWindow()
+            self.monster_results_scroll.contentView().scrollToPoint_(NSMakePoint(0, 0))
+            self.monster_results_scroll.reflectScrolledClipView_(self.monster_results_scroll.contentView())
 
     def refreshSpellResults(self):
         query = str(self.spell_search_field.stringValue()).strip()
