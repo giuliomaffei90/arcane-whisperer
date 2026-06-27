@@ -44,10 +44,12 @@ try:
         NSEventMaskKeyDown,
         NSFont,
         NSFontAttributeName,
+        NSFontManager,
         NSForegroundColorAttributeName,
         NSGraphicsContext,
         NSImage,
         NSImageView,
+        NSItalicFontMask,
         NSStringDrawingUsesFontLeading,
         NSStringDrawingUsesLineFragmentOrigin,
         NSMakeRect,
@@ -1014,26 +1016,36 @@ def attributed_tracker_body(body: str, bar_ranges: list[tuple[int, int, float | 
 
 class CheckboxSquareView(NSView):
     checked: bool
+    fill_color: Any
+    stroke_color: Any
 
     def initWithFrame_(self, frame):
         self = objc.super(CheckboxSquareView, self).initWithFrame_(frame)
         if self is None:
             return None
         self.checked = False
+        self.fill_color = ui_color(1.0, 0.82, 0.26, 0.95)
+        self.stroke_color = ui_color(1.0, 0.82, 0.26, 0.82)
         return self
 
     def setChecked_(self, checked):
         self.checked = bool(checked)
         self.setNeedsDisplay_(True)
 
+    def setFillColor_strokeColor_(self, fill_color, stroke_color):
+        self.fill_color = fill_color
+        self.stroke_color = stroke_color
+        self.setNeedsDisplay_(True)
+
     def drawRect_(self, _rect):
         bounds = self.bounds()
-        box = NSMakeRect(1, 1, bounds.size.width - 2, bounds.size.height - 2)
+        box = NSMakeRect(1.5, 1.5, bounds.size.width - 3, bounds.size.height - 3)
 
-        NSColor.whiteColor().set()
-        path = NSBezierPath.bezierPathWithRect_(box)
+        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(box, 3, 3)
         if self.checked:
+            self.fill_color.set()
             path.fill()
+        self.stroke_color.set()
         path.setLineWidth_(1.5)
         path.stroke()
 
@@ -2639,7 +2651,19 @@ class MainWindowController(NSObject):
     spell_school_filter_popup: NSPopUpButton
     spell_results_scroll: NSScrollView
     spell_results_content: FlippedView
-    spell_roll_label: NSTextField
+    spell_detail_title_label: NSTextField
+    spell_detail_italian_label: NSTextField
+    spell_detail_meta_label: NSTextField
+    spell_components_label: NSTextField
+    spell_component_material_label: NSTextField
+    spell_v_label: NSTextField
+    spell_s_label: NSTextField
+    spell_m_label: NSTextField
+    spell_v_box: CheckboxSquareView
+    spell_s_box: CheckboxSquareView
+    spell_m_box: CheckboxSquareView
+    spell_stats_label: NSTextField
+    spell_detail_header_views: list[Any]
     spell_result_buttons: list[NSButton]
     spell_detail_scroll: NSScrollView
     spell_detail_view: DiceTextView
@@ -2892,8 +2916,6 @@ class MainWindowController(NSObject):
             self.spell_school_filter_popup.addItemWithTitle_(school)
         self.spell_school_filter_popup.setTarget_(self)
         self.spell_school_filter_popup.setAction_("refreshSpellResults:")
-        self.spell_roll_label = make_label("Click a green dice expression to roll.", (0, 0, 320, 24), 12, True)
-        self.spell_roll_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
         self.spell_results_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_results_scroll.setHasVerticalScroller_(True)
         self.spell_results_scroll.setAutohidesScrollers_(False)
@@ -2901,6 +2923,47 @@ class MainWindowController(NSObject):
         self.spell_results_scroll.setBorderType_(0)
         self.spell_results_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_results_scroll.setDocumentView_(self.spell_results_content)
+        self.spell_detail_title_label = make_label("", (0, 0, 320, 34), 26, True)
+        self.spell_detail_title_label.setLineBreakMode_(4)
+        self.spell_detail_italian_label = make_label("", (0, 0, 320, 22), 15)
+        italic_font = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(
+            NSFont.systemFontOfSize_(15),
+            NSItalicFontMask,
+        )
+        self.spell_detail_italian_label.setFont_(italic_font)
+        self.spell_detail_italian_label.setTextColor_(ui_color(0.78, 0.78, 0.82, 1.0))
+        self.spell_detail_italian_label.setLineBreakMode_(4)
+        self.spell_detail_meta_label = make_label("", (0, 0, 320, 24), 15, True)
+        self.spell_detail_meta_label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+        self.spell_detail_meta_label.setLineBreakMode_(4)
+        self.spell_components_label = make_label("Components", (0, 0, 100, 22), 13, True)
+        self.spell_components_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_v_label = make_label("V", (0, 0, 14, 20), 13, True)
+        self.spell_s_label = make_label("S", (0, 0, 14, 20), 13, True)
+        self.spell_m_label = make_label("M", (0, 0, 16, 20), 13, True)
+        for label in (self.spell_v_label, self.spell_s_label, self.spell_m_label):
+            label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+        self.spell_v_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
+        self.spell_s_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
+        self.spell_m_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
+        self.spell_component_material_label = make_multiline(make_label("", (0, 0, 320, 36), 13))
+        self.spell_component_material_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_stats_label = make_multiline(make_label("", (0, 0, 320, 42), 13))
+        self.spell_stats_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_detail_header_views = [
+            self.spell_detail_title_label,
+            self.spell_detail_italian_label,
+            self.spell_detail_meta_label,
+            self.spell_components_label,
+            self.spell_v_label,
+            self.spell_v_box,
+            self.spell_s_label,
+            self.spell_s_box,
+            self.spell_m_label,
+            self.spell_m_box,
+            self.spell_component_material_label,
+            self.spell_stats_label,
+        ]
         self.spell_detail_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_detail_scroll.setHasVerticalScroller_(True)
         self.spell_detail_scroll.setAutohidesScrollers_(False)
@@ -3019,7 +3082,7 @@ class MainWindowController(NSObject):
             self.spell_level_filter_popup,
             self.spell_school_filter_popup,
             self.spell_results_scroll,
-            self.spell_roll_label,
+            *self.spell_detail_header_views,
             self.spell_detail_scroll,
         ):
             self.content_view.addSubview_(view)
@@ -3055,7 +3118,7 @@ class MainWindowController(NSObject):
             self.spell_level_filter_popup,
             self.spell_school_filter_popup,
             self.spell_results_scroll,
-            self.spell_roll_label,
+            *self.spell_detail_header_views,
             self.spell_detail_scroll,
         ]
         self.dice_views = [
@@ -3093,6 +3156,14 @@ class MainWindowController(NSObject):
         bounds = self.content_view.bounds()
         width = int(bounds.size.width)
         height = int(bounds.size.height)
+
+        def centered_control_rect(x: float, center_y: float, width: float, height: float):
+            return NSMakeRect(x, center_y - height / 2, width, height)
+
+        def centered_text_rect(label, x: float, center_y: float, width: float):
+            cell_size = label.cell().cellSize()
+            return centered_control_rect(x, center_y, width, max(1, cell_size.height))
+
         tab_y = height - 38
         self.initiative_tab_button.setFrame_(NSMakeRect(20, tab_y, 150, 30))
         self.spells_tab_button.setFrame_(NSMakeRect(178, tab_y, 86, 30))
@@ -3273,9 +3344,51 @@ class MainWindowController(NSObject):
             button.setFrame_(NSMakeRect(0, index * SPELL_RESULT_ROW_STEP, results_document_width, SPELL_RESULT_ROW_HEIGHT))
         detail_x = spell_x + list_width + 28
         detail_width = max(300, spell_width - list_width - 28)
-        self.spell_roll_label.setFrame_(NSMakeRect(detail_x, spell_y + spell_height - 26, detail_width, 22))
-        self.spell_detail_scroll.setFrame_(NSMakeRect(detail_x, spell_y, detail_width, spell_height - 38))
-        self.spell_detail_view.setFrame_(NSMakeRect(0, 0, detail_width - 24, max(spell_height - 38, self.spell_detail_view.frame().size.height)))
+        if self.spell_detail_title_label.isHidden():
+            self.spell_detail_scroll.setFrame_(NSMakeRect(detail_x, spell_y, detail_width, spell_height))
+            self.spell_detail_view.textContainer().setContainerSize_(NSMakeSize(max(120, detail_width - 24), 100000))
+            self.spell_detail_view.setFrame_(
+                NSMakeRect(0, 0, detail_width - 24, max(spell_height, self.spell_detail_view.frame().size.height))
+            )
+        else:
+            detail_top = spell_y + spell_height
+            self.spell_detail_title_label.setFrame_(NSMakeRect(detail_x, detail_top - 36, detail_width, 32))
+            self.spell_detail_italian_label.setFrame_(NSMakeRect(detail_x, detail_top - 60, detail_width, 22))
+            self.spell_detail_meta_label.setFrame_(NSMakeRect(detail_x, detail_top - 92, detail_width, 24))
+
+            component_y = detail_top - 128
+            component_row_height = 24
+            component_center_y = component_y + component_row_height / 2
+            component_box_size = 16
+            self.spell_components_label.setFrame_(centered_text_rect(self.spell_components_label, detail_x, component_center_y, 92))
+            component_x = detail_x + 104
+            for label, box in (
+                (self.spell_v_label, self.spell_v_box),
+                (self.spell_s_label, self.spell_s_box),
+                (self.spell_m_label, self.spell_m_box),
+            ):
+                label.setFrame_(centered_text_rect(label, component_x, component_center_y, 16))
+                box.setFrame_(centered_control_rect(component_x + 20, component_center_y, component_box_size, component_box_size))
+                component_x += 52
+            material_x = component_x + 2
+            material_width = detail_x + detail_width - material_x
+            stats_y = component_y - 44
+            if material_width >= 140:
+                self.spell_component_material_label.setFrame_(
+                    centered_text_rect(self.spell_component_material_label, material_x, component_center_y, material_width)
+                )
+            else:
+                self.spell_component_material_label.setFrame_(NSMakeRect(detail_x, component_y - 30, detail_width, 28))
+                stats_y = component_y - 66
+            self.spell_stats_label.setFrame_(NSMakeRect(detail_x, stats_y, detail_width, 42))
+
+            scroll_top = stats_y - 12
+            scroll_height = max(160, scroll_top - spell_y)
+            self.spell_detail_scroll.setFrame_(NSMakeRect(detail_x, spell_y, detail_width, scroll_height))
+            self.spell_detail_view.textContainer().setContainerSize_(NSMakeSize(max(120, detail_width - 24), 100000))
+            self.spell_detail_view.setFrame_(
+                NSMakeRect(0, 0, detail_width - 24, max(scroll_height, self.spell_detail_view.frame().size.height))
+            )
 
         dice_panel_frame = self.dice_panel.frame()
         if dice_panel_frame.size.width <= 1:
@@ -3860,6 +3973,22 @@ class MainWindowController(NSObject):
     def refreshSpellResults_(self, _sender):
         self.refreshSpellResults()
 
+    def setSpellDetailHeaderHidden_(self, hidden: bool):
+        for view in self.spell_detail_header_views:
+            view.setHidden_(hidden)
+
+    def resizeSpellDetailBody(self):
+        if self.spell_detail_scroll is None:
+            return
+        self.spell_detail_view.layoutManager().ensureLayoutForTextContainer_(self.spell_detail_view.textContainer())
+        height = max(
+            self.spell_detail_scroll.frame().size.height,
+            self.spell_detail_view.layoutManager().usedRectForTextContainer_(self.spell_detail_view.textContainer()).size.height + 24,
+        )
+        self.spell_detail_view.setFrame_(NSMakeRect(0, 0, self.spell_detail_scroll.frame().size.width - 24, height))
+        self.spell_detail_scroll.contentView().scrollToPoint_(NSMakePoint(0, 0))
+        self.spell_detail_scroll.reflectScrolledClipView_(self.spell_detail_scroll.contentView())
+
     def refreshSpellResults(self):
         query = str(self.spell_search_field.stringValue()).strip()
         self.displayed_spells = search_spells(
@@ -3884,9 +4013,11 @@ class MainWindowController(NSObject):
         if self.displayed_spells:
             self.showSpellInDetail_(self.displayed_spells[0])
         else:
+            self.setSpellDetailHeaderHidden_(True)
+            self.layoutMainWindow()
             self.spell_detail_view.setString_("No matching spells.")
             self.spell_detail_view.setDiceRanges_([])
-            self.spell_roll_label.setStringValue_("")
+            self.resizeSpellDetailBody()
 
     def selectSpellResult_(self, sender):
         index = int(sender.tag())
@@ -3895,32 +4026,35 @@ class MainWindowController(NSObject):
         self.showSpellInDetail_(self.displayed_spells[index])
 
     def showSpellInDetail_(self, spell):
-        self.spell_roll_label.setStringValue_("Click a green dice expression to roll.")
         title, meta, body = format_spell_for_overlay(spell)
-        italian = f"\n({spell.italian_name})" if spell.italian_name else ""
-        details = [
-            f"{title}{italian}",
-            "",
-            meta,
-            "",
-            body,
-            "",
-            f"Components: {component_badge_text(spell.components) or '-'}",
+        self.setSpellDetailHeaderHidden_(False)
+        self.spell_detail_title_label.setStringValue_(title)
+        italian_name = spell.italian_name.strip()
+        if italian_name and normalize(italian_name) != normalize(spell.name):
+            self.spell_detail_italian_label.setStringValue_(f"({italian_name})")
+        else:
+            self.spell_detail_italian_label.setStringValue_("")
+        self.spell_detail_meta_label.setStringValue_(meta)
+
+        flags = component_flags(spell.components)
+        self.spell_v_box.setChecked_(flags["V"])
+        self.spell_s_box.setChecked_(flags["S"])
+        self.spell_m_box.setChecked_(flags["M"])
+        self.spell_component_material_label.setStringValue_(component_material(spell.components))
+
+        stats = [
             f"Range: {spell.range or '-'}",
             f"Duration: {spell.duration or '-'}",
         ]
         if spell.spell_lists:
-            details.append(f"Classes: {', '.join(spell.spell_lists)}")
-        detail_body = "\n".join(details)
-        attributed = attributed_spell_body(detail_body)
+            stats.append(f"Classes: {', '.join(spell.spell_lists)}")
+        self.spell_stats_label.setStringValue_("\n".join(stats))
+
+        attributed = attributed_spell_body(body)
         self.spell_detail_view.textStorage().setAttributedString_(attributed)
-        self.spell_detail_view.setDiceRanges_(dice_ranges_for_body(detail_body))
-        self.spell_detail_view.layoutManager().ensureLayoutForTextContainer_(self.spell_detail_view.textContainer())
-        height = max(
-            self.spell_detail_scroll.frame().size.height,
-            self.spell_detail_view.layoutManager().usedRectForTextContainer_(self.spell_detail_view.textContainer()).size.height + 24,
-        )
-        self.spell_detail_view.setFrame_(NSMakeRect(0, 0, self.spell_detail_scroll.frame().size.width - 24, height))
+        self.spell_detail_view.setDiceRanges_(dice_ranges_for_body(body))
+        self.layoutMainWindow()
+        self.resizeSpellDetailBody()
 
     def addMonster_(self, sender):
         index = int(sender.tag())
@@ -4369,8 +4503,6 @@ class MainWindowController(NSObject):
         record_dice_roll_history(result)
         if self.dice_result_label is not None and self.current_tab == "dice":
             self.dice_result_label.setStringValue_(result)
-        if self.spell_roll_label is not None and not self.spell_roll_label.isHidden():
-            self.spell_roll_label.setStringValue_(result)
 
     def openSpell_(self, spell):
         if spell is None:
