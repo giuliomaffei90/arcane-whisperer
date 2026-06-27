@@ -1653,14 +1653,64 @@ def find_exact_spell_in_text(text: str, lookup: dict[str, Spell]) -> Spell | Non
     return None
 
 
-def search_spells(query: str, spells: list[Spell], limit: int = 8) -> list[Spell]:
+SPELL_LEVEL_ORDER = (
+    "Cantrip",
+    "1st Level",
+    "2nd Level",
+    "3rd Level",
+    "4th Level",
+    "5th Level",
+    "6th Level",
+    "7th Level",
+    "8th Level",
+    "9th Level",
+)
+
+SPELL_SCHOOL_ORDER = (
+    "Abjuration",
+    "Conjuration",
+    "Divination",
+    "Enchantment",
+    "Evocation",
+    "Illusion",
+    "Necromancy",
+    "Transmutation",
+)
+
+
+def spell_level_values(spells: list[Spell]) -> list[str]:
+    values = {spell.level for spell in spells if spell.level}
+    return [level for level in SPELL_LEVEL_ORDER if level in values]
+
+
+def spell_school_values(spells: list[Spell]) -> list[str]:
+    values = {spell.school for spell in spells if spell.school}
+    ordered = [school for school in SPELL_SCHOOL_ORDER if school in values]
+    extras = sorted(values - set(SPELL_SCHOOL_ORDER), key=normalize)
+    return [*ordered, *extras]
+
+
+def search_spells(
+    query: str,
+    spells: list[Spell],
+    limit: int | None = 8,
+    level_filter: str | None = None,
+    school_filter: str | None = None,
+) -> list[Spell]:
+    filtered_spells = [
+        spell
+        for spell in spells
+        if (not level_filter or spell.level == level_filter)
+        and (not school_filter or spell.school == school_filter)
+    ]
     normalized_query = normalize_transcript_for_matching(query)
     if not normalized_query:
-        return spells[:limit]
+        results = sorted(filtered_spells, key=lambda spell: normalize(spell.name))
+        return results if limit is None else results[:limit]
 
     ranked: list[tuple[float, int, str, Spell]] = []
     compact_query = normalized_query.replace(" ", "")
-    for spell in spells:
+    for spell in filtered_spells:
         names = [spell.name, spell.italian_name, *spell.aliases]
         best_score = 0.0
         best_length = 9999
@@ -1687,7 +1737,8 @@ def search_spells(query: str, spells: list[Spell], limit: int = 8) -> list[Spell
             ranked.append((best_score, best_length, spell.name, spell))
 
     ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
-    return [spell for _score, _length, _name, spell in ranked[:limit]]
+    results = [spell for _score, _length, _name, spell in ranked]
+    return results if limit is None else results[:limit]
 
 
 def find_fuzzy_spell_in_text(normalized_text: str, lookup: dict[str, Spell]) -> Spell | None:
@@ -2584,6 +2635,10 @@ class MainWindowController(NSObject):
     monster_result_buttons: list[NSButton]
     monster_add_buttons: list[NSButton]
     spell_search_field: NSTextField
+    spell_level_filter_popup: NSPopUpButton
+    spell_school_filter_popup: NSPopUpButton
+    spell_results_scroll: NSScrollView
+    spell_results_content: FlippedView
     spell_roll_label: NSTextField
     spell_result_buttons: list[NSButton]
     spell_detail_scroll: NSScrollView
@@ -2825,15 +2880,27 @@ class MainWindowController(NSObject):
         self.spell_search_field.setPlaceholderString_("Search spells in English or Italian")
         self.spell_search_field.setDelegate_(self)
         style_text_input(self.spell_search_field)
+        self.spell_level_filter_popup = StyledPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 28))
+        self.spell_level_filter_popup.addItemWithTitle_("Any Level")
+        for level in spell_level_values(self.spells):
+            self.spell_level_filter_popup.addItemWithTitle_(level)
+        self.spell_level_filter_popup.setTarget_(self)
+        self.spell_level_filter_popup.setAction_("refreshSpellResults:")
+        self.spell_school_filter_popup = StyledPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 150, 28))
+        self.spell_school_filter_popup.addItemWithTitle_("Any School")
+        for school in spell_school_values(self.spells):
+            self.spell_school_filter_popup.addItemWithTitle_(school)
+        self.spell_school_filter_popup.setTarget_(self)
+        self.spell_school_filter_popup.setAction_("refreshSpellResults:")
         self.spell_roll_label = make_label("Click a green dice expression to roll.", (0, 0, 320, 24), 12, True)
         self.spell_roll_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
-        for index in range(18):
-            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, SPELL_RESULT_ROW_HEIGHT))
-            button.setTarget_(self)
-            button.setAction_("selectSpellResult:")
-            button.setTag_(index)
-            button.setHidden_(True)
-            self.spell_result_buttons.append(button)
+        self.spell_results_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
+        self.spell_results_scroll.setHasVerticalScroller_(True)
+        self.spell_results_scroll.setAutohidesScrollers_(False)
+        self.spell_results_scroll.setDrawsBackground_(False)
+        self.spell_results_scroll.setBorderType_(0)
+        self.spell_results_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
+        self.spell_results_scroll.setDocumentView_(self.spell_results_content)
         self.spell_detail_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_detail_scroll.setHasVerticalScroller_(True)
         self.spell_detail_scroll.setAutohidesScrollers_(False)
@@ -2947,10 +3014,15 @@ class MainWindowController(NSObject):
             self.tracker_scroll,
         ):
             self.content_view.addSubview_(view)
-        for view in (self.spell_search_field, self.spell_roll_label, self.spell_detail_scroll):
+        for view in (
+            self.spell_search_field,
+            self.spell_level_filter_popup,
+            self.spell_school_filter_popup,
+            self.spell_results_scroll,
+            self.spell_roll_label,
+            self.spell_detail_scroll,
+        ):
             self.content_view.addSubview_(view)
-        for button in self.spell_result_buttons:
-            self.content_view.addSubview_(button)
         for view in (
             self.dice_title_label,
             self.dice_hint_label,
@@ -2980,9 +3052,11 @@ class MainWindowController(NSObject):
         self.spell_views = [
             self.spell_panel,
             self.spell_search_field,
+            self.spell_level_filter_popup,
+            self.spell_school_filter_popup,
+            self.spell_results_scroll,
             self.spell_roll_label,
             self.spell_detail_scroll,
-            *self.spell_result_buttons,
         ]
         self.dice_views = [
             self.dice_panel,
@@ -3184,9 +3258,19 @@ class MainWindowController(NSObject):
         spell_height = spell_panel_frame.size.height - spell_margin * 2
         list_width = min(430, max(320, spell_width * 0.38))
         self.spell_search_field.setFrame_(NSMakeRect(spell_x, spell_y + spell_height - 42, list_width, 34))
-        results_top = spell_y + spell_height - 92
+        filter_gap = 10
+        level_filter_w = min(128, max(108, list_width * 0.36))
+        school_filter_w = max(140, list_width - level_filter_w - filter_gap)
+        filter_y = spell_y + spell_height - 84
+        self.spell_level_filter_popup.setFrame_(NSMakeRect(spell_x, filter_y, level_filter_w, 34))
+        self.spell_school_filter_popup.setFrame_(NSMakeRect(spell_x + level_filter_w + filter_gap, filter_y, school_filter_w, 34))
+        results_height = max(120, filter_y - spell_y - 12)
+        self.spell_results_scroll.setFrame_(NSMakeRect(spell_x, spell_y, list_width, results_height))
+        results_document_width = max(120, list_width - 18)
+        results_document_height = max(results_height, len(self.displayed_spells) * SPELL_RESULT_ROW_STEP)
+        self.spell_results_content.setFrame_(NSMakeRect(0, 0, results_document_width, results_document_height))
         for index, button in enumerate(self.spell_result_buttons):
-            button.setFrame_(NSMakeRect(spell_x, results_top - index * SPELL_RESULT_ROW_STEP, list_width, SPELL_RESULT_ROW_HEIGHT))
+            button.setFrame_(NSMakeRect(0, index * SPELL_RESULT_ROW_STEP, results_document_width, SPELL_RESULT_ROW_HEIGHT))
         detail_x = spell_x + list_width + 28
         detail_width = max(300, spell_width - list_width - 28)
         self.spell_roll_label.setFrame_(NSMakeRect(detail_x, spell_y + spell_height - 26, detail_width, 22))
@@ -3748,9 +3832,44 @@ class MainWindowController(NSObject):
             self.monster_results_scroll.contentView().scrollToPoint_(NSMakePoint(0, 0))
             self.monster_results_scroll.reflectScrolledClipView_(self.monster_results_scroll.contentView())
 
+    def selectedSpellLevelFilter(self) -> str | None:
+        selected = self.spell_level_filter_popup.selectedItem()
+        title = str(selected.title()) if selected is not None else ""
+        if not title or title == "Any Level":
+            return None
+        return title
+
+    def selectedSpellSchoolFilter(self) -> str | None:
+        selected = self.spell_school_filter_popup.selectedItem()
+        title = str(selected.title()) if selected is not None else ""
+        if not title or title == "Any School":
+            return None
+        return title
+
+    def ensureSpellResultRows_(self, count: int):
+        while len(self.spell_result_buttons) < count:
+            index = len(self.spell_result_buttons)
+            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, SPELL_RESULT_ROW_HEIGHT))
+            button.setTarget_(self)
+            button.setAction_("selectSpellResult:")
+            button.setTag_(index)
+            button.setHidden_(True)
+            self.spell_result_buttons.append(button)
+            self.spell_results_content.addSubview_(button)
+
+    def refreshSpellResults_(self, _sender):
+        self.refreshSpellResults()
+
     def refreshSpellResults(self):
         query = str(self.spell_search_field.stringValue()).strip()
-        self.displayed_spells = search_spells(query, self.spells, len(self.spell_result_buttons))
+        self.displayed_spells = search_spells(
+            query,
+            self.spells,
+            None,
+            self.selectedSpellLevelFilter(),
+            self.selectedSpellSchoolFilter(),
+        )
+        self.ensureSpellResultRows_(len(self.displayed_spells))
         for index, button in enumerate(self.spell_result_buttons):
             if index >= len(self.displayed_spells):
                 button.setHidden_(True)
@@ -3758,6 +3877,10 @@ class MainWindowController(NSObject):
             spell = self.displayed_spells[index]
             button.configureSpellResult_(spell)
             button.setHidden_(False)
+        if self.spell_results_scroll is not None:
+            self.layoutMainWindow()
+            self.spell_results_scroll.contentView().scrollToPoint_(NSMakePoint(0, 0))
+            self.spell_results_scroll.reflectScrolledClipView_(self.spell_results_scroll.contentView())
         if self.displayed_spells:
             self.showSpellInDetail_(self.displayed_spells[0])
         else:
@@ -4254,16 +4377,20 @@ class MainWindowController(NSObject):
             return
         self.current_tab = "spells"
         self.spell_search_field.setStringValue_(spell.name)
+        self.spell_level_filter_popup.selectItemWithTitle_("Any Level")
+        self.spell_school_filter_popup.selectItemWithTitle_("Any School")
         self.applyCurrentTab()
         self.refreshSpellResults()
         if spell not in self.displayed_spells:
-            self.displayed_spells = [spell, *self.displayed_spells[: max(0, len(self.spell_result_buttons) - 1)]]
+            self.displayed_spells = [spell, *self.displayed_spells]
+            self.ensureSpellResultRows_(len(self.displayed_spells))
             for index, button in enumerate(self.spell_result_buttons):
                 if index >= len(self.displayed_spells):
                     button.setHidden_(True)
                     continue
                 button.configureSpellResult_(self.displayed_spells[index])
                 button.setHidden_(False)
+            self.layoutMainWindow()
         self.showSpellInDetail_(spell)
         self.window.makeKeyAndOrderFront_(None)
 
