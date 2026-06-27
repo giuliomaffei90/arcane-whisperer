@@ -9,7 +9,6 @@ spell reference, bestiary lookup, and dice roller.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import functools
 import html
 import http.server
@@ -40,7 +39,6 @@ try:
     warnings.filterwarnings("ignore", category=objc.ObjCPointerWarning)
     from AppKit import (
         NSApp,
-        NSAlternateKeyMask,
         NSApplication,
         NSApplicationActivationPolicyRegular,
         NSAlert,
@@ -48,11 +46,8 @@ try:
         NSBezierPath,
         NSButton,
         NSColor,
-        NSCommandKeyMask,
-        NSControlKeyMask,
+        NSColorWell,
         NSCursor,
-        NSEvent,
-        NSEventMaskKeyDown,
         NSFont,
         NSFontAttributeName,
         NSFontManager,
@@ -61,8 +56,6 @@ try:
         NSImage,
         NSImageView,
         NSItalicFontMask,
-        NSStringDrawingUsesFontLeading,
-        NSStringDrawingUsesLineFragmentOrigin,
         NSMakeRect,
         NSMenu,
         NSMenuItem,
@@ -71,11 +64,9 @@ try:
         NSPanel,
         NSParagraphStyleAttributeName,
         NSPopUpButton,
-        NSProgressIndicator,
         NSScrollView,
         NSScreen,
         NSStatusBar,
-        NSShiftKeyMask,
         NSTrackingActiveAlways,
         NSTrackingArea,
         NSTrackingInVisibleRect,
@@ -145,7 +136,6 @@ DEFAULT_DICE_ROLLER_HTML = bundled_resource_path("assets/dice_roller/index.html"
 DEFAULT_ICON_DIR = bundled_resource_path("assets/icons")
 LOG_FILE = Path.home() / "Library" / "Logs" / "Arcane Manager" / "arcane_manager.log"
 APP_RETAINED_OBJECTS: list[Any] = []
-GLOBAL_HOTKEY_DELEGATE: Any = None
 DICE_ROLL_ANIMATOR: Any = None
 THREE_D_DICE_ROLLER: Any = None
 DICE_ASSET_SERVER: Any = None
@@ -186,36 +176,6 @@ TRANSCRIPT_NORMALIZATION_REPLACEMENTS = {
 }
 
 
-def four_char_code(value: str) -> int:
-    encoded = value.encode("macroman")
-    result = 0
-    for byte in encoded:
-        result = (result << 8) | byte
-    return result
-
-
-class CarbonEventHotKeyID(ctypes.Structure):
-    _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
-
-
-class CarbonEventTypeSpec(ctypes.Structure):
-    _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
-
-
-CARBON_EVENT_HANDLER_TYPE = ctypes.CFUNCTYPE(
-    ctypes.c_int32,
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-    ctypes.c_void_p,
-)
-CARBON_HOTKEY_SIGNATURE = four_char_code("AWHK")
-CARBON_EVENT_CLASS_KEYBOARD = four_char_code("keyb")
-CARBON_EVENT_HOTKEY_PRESSED = 5
-CARBON_CMD_KEY = 1 << 8
-CARBON_SHIFT_KEY = 1 << 9
-CARBON_OPTION_KEY = 1 << 11
-CARBON_CONTROL_KEY = 1 << 12
-SEARCH_HOTKEY_PREF = "SearchHotkey"
 PARTIES_PREF = "InitiativeParties"
 ADVENTURE_VAULT_PREF = "AdventureVaultPath"
 ADVENTURE_SELECTED_NOTE_PREF = "AdventureSelectedNotePath"
@@ -290,173 +250,6 @@ CLASS_ICON_FILES = {
 }
 MONSTER_ICON_FILE = "monster.png"
 ICON_IMAGE_CACHE: dict[str, Any] = {}
-DEFAULT_SEARCH_HOTKEY_KEY = " "
-DEFAULT_SEARCH_HOTKEY_KEY_CODE = 49
-DEFAULT_SEARCH_HOTKEY_MODIFIERS = int(NSCommandKeyMask | NSShiftKeyMask)
-SUPPORTED_HOTKEY_MODIFIERS = int(NSCommandKeyMask | NSShiftKeyMask | NSAlternateKeyMask | NSControlKeyMask)
-HOTKEY_KEY_CODE_BY_KEY = {
-    "a": 0,
-    "s": 1,
-    "d": 2,
-    "f": 3,
-    "h": 4,
-    "g": 5,
-    "z": 6,
-    "x": 7,
-    "c": 8,
-    "v": 9,
-    "b": 11,
-    "q": 12,
-    "w": 13,
-    "e": 14,
-    "r": 15,
-    "y": 16,
-    "t": 17,
-    "1": 18,
-    "2": 19,
-    "3": 20,
-    "4": 21,
-    "6": 22,
-    "5": 23,
-    "=": 24,
-    "9": 25,
-    "7": 26,
-    "-": 27,
-    "8": 28,
-    "0": 29,
-    "]": 30,
-    "o": 31,
-    "u": 32,
-    "[": 33,
-    "i": 34,
-    "p": 35,
-    "l": 37,
-    "j": 38,
-    "'": 39,
-    "k": 40,
-    ";": 41,
-    "\\": 42,
-    ",": 43,
-    "/": 44,
-    "n": 45,
-    "m": 46,
-    ".": 47,
-    " ": 49,
-}
-
-
-def carbon_modifier_flags(appkit_modifiers: int) -> int:
-    flags = 0
-    if appkit_modifiers & int(NSCommandKeyMask):
-        flags |= CARBON_CMD_KEY
-    if appkit_modifiers & int(NSShiftKeyMask):
-        flags |= CARBON_SHIFT_KEY
-    if appkit_modifiers & int(NSAlternateKeyMask):
-        flags |= CARBON_OPTION_KEY
-    if appkit_modifiers & int(NSControlKeyMask):
-        flags |= CARBON_CONTROL_KEY
-    return flags
-
-
-def load_carbon_framework():
-    carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
-    carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
-    carbon.InstallEventHandler.argtypes = [
-        ctypes.c_void_p,
-        CARBON_EVENT_HANDLER_TYPE,
-        ctypes.c_uint32,
-        ctypes.POINTER(CarbonEventTypeSpec),
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    carbon.InstallEventHandler.restype = ctypes.c_int32
-    carbon.RegisterEventHotKey.argtypes = [
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        CarbonEventHotKeyID,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    carbon.RegisterEventHotKey.restype = ctypes.c_int32
-    carbon.UnregisterEventHotKey.argtypes = [ctypes.c_void_p]
-    carbon.UnregisterEventHotKey.restype = ctypes.c_int32
-    return carbon
-
-
-@dataclass(frozen=True)
-class Hotkey:
-    modifiers: int
-    key: str
-    key_code: int
-
-
-def default_search_hotkey() -> Hotkey:
-    return Hotkey(DEFAULT_SEARCH_HOTKEY_MODIFIERS, DEFAULT_SEARCH_HOTKEY_KEY, DEFAULT_SEARCH_HOTKEY_KEY_CODE)
-
-
-def hotkey_key_display(key: str) -> str:
-    if key == " ":
-        return "Space"
-    return key.upper()
-
-
-def hotkey_display(hotkey: Hotkey) -> str:
-    parts = []
-    for mask, name in (
-        (NSCommandKeyMask, "Cmd"),
-        (NSShiftKeyMask, "Shift"),
-        (NSAlternateKeyMask, "Option"),
-        (NSControlKeyMask, "Ctrl"),
-    ):
-        if hotkey.modifiers & int(mask):
-            parts.append(name)
-    parts.append(hotkey_key_display(hotkey.key))
-    return "+".join(parts)
-
-
-def normalized_hotkey_key(value: Any) -> str:
-    key = str(value or "")
-    if key == " ":
-        return key
-    return key[:1].lower()
-
-
-def valid_hotkey(hotkey: Hotkey) -> bool:
-    if not hotkey.key or hotkey.key_code < 0:
-        return False
-    needs_primary_modifier = int(NSCommandKeyMask | NSAlternateKeyMask | NSControlKeyMask)
-    return bool(hotkey.modifiers & needs_primary_modifier)
-
-
-def key_code_for_key(key: str) -> int:
-    return HOTKEY_KEY_CODE_BY_KEY.get(key, -1)
-
-
-def load_search_hotkey() -> Hotkey:
-    defaults = NSUserDefaults.standardUserDefaults()
-    raw = defaults.stringForKey_(SEARCH_HOTKEY_PREF)
-    if raw:
-        try:
-            payload = json.loads(str(raw))
-            key = normalized_hotkey_key(payload.get("key", DEFAULT_SEARCH_HOTKEY_KEY))
-            hotkey = Hotkey(
-                int(payload.get("modifiers", DEFAULT_SEARCH_HOTKEY_MODIFIERS)) & SUPPORTED_HOTKEY_MODIFIERS,
-                key,
-                int(payload.get("key_code", key_code_for_key(key))),
-            )
-            if valid_hotkey(hotkey):
-                return hotkey
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-    return default_search_hotkey()
-
-
-def save_search_hotkey(hotkey: Hotkey):
-    payload = json.dumps({"modifiers": int(hotkey.modifiers), "key": hotkey.key, "key_code": int(hotkey.key_code)})
-    defaults = NSUserDefaults.standardUserDefaults()
-    defaults.setObject_forKey_(payload, SEARCH_HOTKEY_PREF)
-    defaults.synchronize()
 
 
 def normalize(text: str) -> str:
@@ -708,7 +501,7 @@ def search_creatures(query: str, creatures: list[Creature], cr_filter: str | Non
     return matched if limit is None else matched[:limit]
 
 
-def format_spell_for_overlay(spell: Spell) -> tuple[str, str, str]:
+def format_spell_for_detail(spell: Spell) -> tuple[str, str, str]:
     title = spell.name
     meta_parts = [
         part
@@ -981,18 +774,189 @@ ADVENTURE_COLOR_PALETTE = [
 ]
 
 
+THEME_COLORS_PREF = "arcaneManagerThemeColors"
+
+
+DEFAULT_THEME_RGB: dict[str, tuple[float, float, float]] = {
+    "app_bg": (0x1A / 255, 0x1E / 255, 0x24 / 255),
+    "panel": (0x1F / 255, 0x23 / 255, 0x2B / 255),
+    "panel_alt": (0x1B / 255, 0x20 / 255, 0x27 / 255),
+    "surface": (0x25 / 255, 0x29 / 255, 0x32 / 255),
+    "surface_hover": (0x2B / 255, 0x30 / 255, 0x38 / 255),
+    "surface_soft": (0x22 / 255, 0x26 / 255, 0x2E / 255),
+    "border": (0x36 / 255, 0x3C / 255, 0x47 / 255),
+    "border_soft": (0x2B / 255, 0x30 / 255, 0x38 / 255),
+    "text": (0xE0 / 255, 0xE2 / 255, 0xE6 / 255),
+    "text_strong": (0xF0 / 255, 0xF1 / 255, 0xF4 / 255),
+    "muted": (0x8F / 255, 0x96 / 255, 0xA3 / 255),
+    "link": (0x5A / 255, 0xA7 / 255, 0xF0 / 255),
+    "dice": (0x6D / 255, 0xD6 / 255, 0x74 / 255),
+    "gold": (0xE4 / 255, 0xC1 / 255, 0x61 / 255),
+    "danger": (0xE1 / 255, 0x57 / 255, 0x63 / 255),
+    "monster": (0xDC / 255, 0x5F / 255, 0x77 / 255),
+    "blue_temp": (0x63 / 255, 0xA8 / 255, 0xF5 / 255),
+    "selection": (0x3A / 255, 0x5F / 255, 0x94 / 255),
+}
+
+
+DEFAULT_DICE_THEME_RGB: dict[str, tuple[float, float, float]] = {
+    "overlay_panel": (0x1F / 255, 0x23 / 255, 0x2B / 255),
+    "overlay_border": (0x56 / 255, 0x60 / 255, 0x70 / 255),
+    "overlay_stage": (0x1A / 255, 0x1E / 255, 0x24 / 255),
+    "overlay_fallback": (0x1A / 255, 0x1E / 255, 0x24 / 255),
+    "dice_red": (0xE1 / 255, 0x57 / 255, 0x63 / 255),
+    "dice_text": (0xF0 / 255, 0xF1 / 255, 0xF4 / 255),
+    "dice_green": (0x6D / 255, 0xD6 / 255, 0x74 / 255),
+}
+
+
+THEME_RGB = dict(DEFAULT_THEME_RGB)
+DICE_THEME_RGB = dict(DEFAULT_DICE_THEME_RGB)
+
+
+THEME_COLOR_LABELS = [
+    ("app_bg", "App background"),
+    ("panel", "Main panels"),
+    ("panel_alt", "Sidebar panels"),
+    ("surface_soft", "Soft surfaces"),
+    ("surface", "Controls and rows"),
+    ("surface_hover", "Hover and selected controls"),
+    ("border_soft", "Subtle borders"),
+    ("border", "Strong borders"),
+    ("text", "Body text"),
+    ("text_strong", "Heading text"),
+    ("muted", "Muted text"),
+    ("link", "Links"),
+    ("dice", "Dice and HP"),
+    ("gold", "Spell metadata"),
+    ("danger", "Danger states"),
+    ("monster", "Monster emphasis"),
+    ("blue_temp", "Temporary HP"),
+    ("selection", "Selection"),
+]
+
+
+DICE_THEME_COLOR_LABELS = [
+    ("overlay_panel", "Overlay panel"),
+    ("overlay_border", "Overlay border"),
+    ("overlay_stage", "Stage tint"),
+    ("overlay_fallback", "Fallback background"),
+    ("dice_red", "Dice body"),
+    ("dice_text", "Dice text"),
+    ("dice_green", "Result green"),
+]
+
+
+def rgb_to_hex(rgb: tuple[float, float, float]) -> str:
+    values = [max(0, min(255, int(round(component * 255)))) for component in rgb]
+    return "#{:02x}{:02x}{:02x}".format(*values)
+
+
+def hex_to_rgb(value: str) -> tuple[float, float, float] | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return None
+    return (
+        int(text[1:3], 16) / 255.0,
+        int(text[3:5], 16) / 255.0,
+        int(text[5:7], 16) / 255.0,
+    )
+
+
+def color_to_hex(color) -> str:
+    converted = color
+    if hasattr(color, "colorUsingColorSpaceName_"):
+        try:
+            converted = color.colorUsingColorSpaceName_("NSCalibratedRGBColorSpace") or color
+        except Exception:
+            converted = color
+    return "#{:02x}{:02x}{:02x}".format(
+        max(0, min(255, int(round(float(converted.redComponent()) * 255)))),
+        max(0, min(255, int(round(float(converted.greenComponent()) * 255)))),
+        max(0, min(255, int(round(float(converted.blueComponent()) * 255)))),
+    )
+
+
+def theme_snapshot() -> dict[str, dict[str, str]]:
+    return {
+        "app": {key: rgb_to_hex(THEME_RGB[key]) for key in DEFAULT_THEME_RGB},
+        "dice": {key: rgb_to_hex(DICE_THEME_RGB[key]) for key in DEFAULT_DICE_THEME_RGB},
+    }
+
+
+def load_theme_overrides():
+    global THEME_RGB, DICE_THEME_RGB
+    THEME_RGB = dict(DEFAULT_THEME_RGB)
+    DICE_THEME_RGB = dict(DEFAULT_DICE_THEME_RGB)
+    raw = NSUserDefaults.standardUserDefaults().stringForKey_(THEME_COLORS_PREF)
+    if not raw:
+        return
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    for section, target, defaults in (
+        ("app", THEME_RGB, DEFAULT_THEME_RGB),
+        ("dice", DICE_THEME_RGB, DEFAULT_DICE_THEME_RGB),
+    ):
+        values = data.get(section)
+        if not isinstance(values, dict):
+            continue
+        for key in defaults:
+            rgb = hex_to_rgb(str(values.get(key, "")))
+            if rgb is not None:
+                target[key] = rgb
+
+
+def save_theme_overrides():
+    defaults = NSUserDefaults.standardUserDefaults()
+    defaults.setObject_forKey_(json.dumps(theme_snapshot()), THEME_COLORS_PREF)
+    defaults.synchronize()
+
+
+def reset_theme_overrides():
+    global THEME_RGB, DICE_THEME_RGB
+    THEME_RGB = dict(DEFAULT_THEME_RGB)
+    DICE_THEME_RGB = dict(DEFAULT_DICE_THEME_RGB)
+    defaults = NSUserDefaults.standardUserDefaults()
+    defaults.removeObjectForKey_(THEME_COLORS_PREF)
+    defaults.synchronize()
+
+
+def css_rgba(name: str, alpha: float) -> str:
+    red, green, blue = DICE_THEME_RGB[name]
+    return f"rgba({int(round(red * 255))}, {int(round(green * 255))}, {int(round(blue * 255))}, {alpha:.2f})"
+
+
+def dice_theme_payload() -> dict[str, str]:
+    return {
+        "overlayPanel": rgb_to_hex(DICE_THEME_RGB["overlay_panel"]),
+        "overlayBorder": rgb_to_hex(DICE_THEME_RGB["overlay_border"]),
+        "overlayStage": rgb_to_hex(DICE_THEME_RGB["overlay_stage"]),
+        "overlayFallback": rgb_to_hex(DICE_THEME_RGB["overlay_fallback"]),
+        "diceRed": rgb_to_hex(DICE_THEME_RGB["dice_red"]),
+        "diceText": rgb_to_hex(DICE_THEME_RGB["dice_text"]),
+        "diceGreen": rgb_to_hex(DICE_THEME_RGB["dice_green"]),
+    }
+
+
 ADVENTURE_MARKDOWN_CSS = """
 :root {
   color-scheme: dark;
-  --bg: #202329;
-  --panel: #252932;
-  --text: #d8d8dc;
-  --muted: #969aa3;
-  --border: #3a3f49;
-  --link: #48a8f5;
-  --dice: #93f447;
-  --gold: #f0c84b;
-  --danger: #ff5a67;
+  --bg: #1a1e24;
+  --panel: #1f232b;
+  --surface: #252932;
+  --surface-soft: #22262e;
+  --text: #e0e2e6;
+  --strong: #f0f1f4;
+  --muted: #8f96a3;
+  --border: #363c47;
+  --link: #5aa7f0;
+  --dice: #6dd674;
+  --gold: #e4c161;
+  --danger: #e15763;
 }
 * { box-sizing: border-box; }
 html, body { min-height: 100%; margin: 0; background: var(--bg); }
@@ -1002,7 +966,7 @@ body {
   padding: 36px 48px 72px;
 }
 main { max-width: 980px; margin: 0 auto; }
-h1, h2, h3, h4 { color: #ececf0; line-height: 1.2; margin: 1.45em 0 0.55em; }
+h1, h2, h3, h4 { color: var(--strong); line-height: 1.2; margin: 1.45em 0 0.55em; }
 h1 { font-size: 2rem; margin-top: 0; }
 h2 { font-size: 1.58rem; }
 h3 { font-size: 1.28rem; }
@@ -1010,45 +974,45 @@ p, ul, ol, table, blockquote, pre, .callout { margin: 0 0 1.05em; }
 a { color: var(--link); text-decoration: none; cursor: pointer; }
 a:hover { text-decoration: underline; }
 .dice-link { color: var(--dice); font-weight: 700; white-space: nowrap; }
-strong { color: #efeff3; }
-em { color: #dddde2; }
+strong { color: var(--strong); }
+em { color: #d8dbe2; }
 code {
-  color: #f2d27b;
-  background: #171a20;
-  border: 1px solid #333844;
+  color: var(--gold);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0.08em 0.32em;
   font-family: "SF Mono", Menlo, monospace;
   font-size: 0.88em;
 }
 pre {
-  background: #171a20;
-  border: 1px solid #333844;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px 16px;
   overflow-x: auto;
 }
-pre code { border: 0; padding: 0; background: transparent; color: #d6d7dc; }
+pre code { border: 0; padding: 0; background: transparent; color: var(--text); }
 table {
   width: 100%;
   border-collapse: collapse;
-  background: #1d2027;
+  background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
 th, td { border: 1px solid var(--border); padding: 8px 10px; vertical-align: top; }
-th { color: var(--gold); background: #272b34; text-align: left; }
+th { color: var(--gold); background: var(--surface); text-align: left; }
 blockquote {
-  border-left: 4px solid #5b6575;
-  color: #caccd3;
+  border-left: 4px solid #4b5564;
+  color: #c9cdd5;
   padding: 0.15em 0 0.15em 1em;
 }
 .callout {
-  --callout-bg: #2f343d;
-  --callout-border: #444b58;
-  --callout-accent: #8f98a6;
-  --callout-title: #aeb6c4;
+  --callout-bg: #22262e;
+  --callout-border: #363c47;
+  --callout-accent: #8f96a3;
+  --callout-title: #c3c8d1;
   background: var(--callout-bg);
   border: 1px solid var(--callout-border);
   border-left: 4px solid var(--callout-accent);
@@ -1071,33 +1035,33 @@ blockquote {
 }
 .callout-title a { color: inherit; }
 .callout-quote {
-  --callout-bg: #2b3038;
-  --callout-border: #343943;
-  --callout-accent: #90949d;
-  --callout-title: #b0b3ba;
+  --callout-bg: #20242c;
+  --callout-border: #2f3540;
+  --callout-accent: #8f96a3;
+  --callout-title: #c3c8d1;
 }
 .callout-quote .callout-title::before { content: "❞"; }
 .callout-info, .callout-note, .callout-tip {
-  --callout-bg: #233149;
-  --callout-border: #314664;
-  --callout-accent: #2294ff;
-  --callout-title: #2294ff;
+  --callout-bg: #202c40;
+  --callout-border: #2b405c;
+  --callout-accent: var(--link);
+  --callout-title: var(--link);
 }
 .callout-info .callout-title::before,
 .callout-note .callout-title::before,
 .callout-tip .callout-title::before { content: "ⓘ"; }
 .callout-warning, .callout-caution, .callout-attention {
-  --callout-bg: #3a3331;
-  --callout-border: #514741;
-  --callout-accent: #f39a32;
-  --callout-title: #ffa43f;
+  --callout-bg: #302d25;
+  --callout-border: #463f2d;
+  --callout-accent: var(--gold);
+  --callout-title: var(--gold);
 }
 .callout-warning .callout-title::before,
 .callout-caution .callout-title::before,
 .callout-attention .callout-title::before { content: "⚠"; }
 .callout-danger, .callout-failure, .callout-error {
-  --callout-bg: #3b292e;
-  --callout-border: #5a3941;
+  --callout-bg: #33262c;
+  --callout-border: #50343d;
   --callout-accent: var(--danger);
   --callout-title: var(--danger);
 }
@@ -1115,6 +1079,27 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
   body { padding: 24px 26px 56px; font-size: 15px; }
 }
 """
+
+
+def adventure_markdown_css() -> str:
+    replacements = {
+        "--bg: #1a1e24;": f"--bg: {rgb_to_hex(THEME_RGB['app_bg'])};",
+        "--panel: #1f232b;": f"--panel: {rgb_to_hex(THEME_RGB['panel'])};",
+        "--surface: #252932;": f"--surface: {rgb_to_hex(THEME_RGB['surface'])};",
+        "--surface-soft: #22262e;": f"--surface-soft: {rgb_to_hex(THEME_RGB['surface_soft'])};",
+        "--text: #e0e2e6;": f"--text: {rgb_to_hex(THEME_RGB['text'])};",
+        "--strong: #f0f1f4;": f"--strong: {rgb_to_hex(THEME_RGB['text_strong'])};",
+        "--muted: #8f96a3;": f"--muted: {rgb_to_hex(THEME_RGB['muted'])};",
+        "--border: #363c47;": f"--border: {rgb_to_hex(THEME_RGB['border'])};",
+        "--link: #5aa7f0;": f"--link: {rgb_to_hex(THEME_RGB['link'])};",
+        "--dice: #6dd674;": f"--dice: {rgb_to_hex(THEME_RGB['dice'])};",
+        "--gold: #e4c161;": f"--gold: {rgb_to_hex(THEME_RGB['gold'])};",
+        "--danger: #e15763;": f"--danger: {rgb_to_hex(THEME_RGB['danger'])};",
+    }
+    css = ADVENTURE_MARKDOWN_CSS
+    for old, new in replacements.items():
+        css = css.replace(old, new)
+    return css
 
 
 def safe_relative_to(path: Path, root: Path) -> bool:
@@ -1181,11 +1166,11 @@ def add_colored_ranges(attributed, ranges: list[tuple[int, int, Any]], color):
 
 
 def attributed_spell_body(body: str):
-    dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
-    component_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0)
+    dice_color = theme_color("dice")
+    component_color = theme_color("gold")
     attributes = {
         NSFontAttributeName: NSFont.systemFontOfSize_(14),
-        NSForegroundColorAttributeName: NSColor.whiteColor(),
+        NSForegroundColorAttributeName: theme_color("text"),
     }
     attributed = NSMutableAttributedString.alloc().initWithString_attributes_(body, attributes)
     marker = "At Higher Levels."
@@ -1218,8 +1203,8 @@ def attributed_spell_body(body: str):
 
 
 def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]], roll_ranges: list[tuple[int, int, str]] | None = None):
-    dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
-    spell_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0)
+    dice_color = theme_color("dice")
+    spell_color = theme_color("gold")
     base_font_size = 13.0
     base_font = NSFont.systemFontOfSize_(base_font_size)
     italic_font = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(NSFont.userFontOfSize_(base_font_size), NSItalicFontMask)
@@ -1227,7 +1212,7 @@ def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]
     paragraph_style.setLineSpacing_(2.0)
     attributes = {
         NSFontAttributeName: base_font,
-        NSForegroundColorAttributeName: NSColor.whiteColor(),
+        NSForegroundColorAttributeName: theme_color("text"),
         NSParagraphStyleAttributeName: paragraph_style,
     }
     attributed = NSMutableAttributedString.alloc().initWithString_attributes_(body, attributes)
@@ -1284,14 +1269,14 @@ def hp_bar(current: int | None, maximum: int | None, width: int = 12) -> tuple[s
 def attributed_tracker_body(body: str, bar_ranges: list[tuple[int, int, float | None]], current_ranges: list[tuple[int, int]]):
     attributes = {
         NSFontAttributeName: NSFont.monospacedSystemFontOfSize_weight_(13, 0),
-        NSForegroundColorAttributeName: NSColor.whiteColor(),
+        NSForegroundColorAttributeName: theme_color("text"),
     }
     attributed = NSMutableAttributedString.alloc().initWithString_attributes_(body, attributes)
-    muted = ui_color(0.48, 0.48, 0.50, 1.0)
-    healthy = ui_color(0.10, 0.78, 0.52, 1.0)
-    danger = ui_color(1.0, 0.18, 0.39, 1.0)
-    down = ui_color(0.55, 0.12, 0.18, 1.0)
-    current_color = ui_color(1.0, 0.82, 0.26, 1.0)
+    muted = theme_color("muted")
+    healthy = theme_color("dice")
+    danger = theme_color("monster")
+    down = theme_color("danger")
+    current_color = theme_color("gold")
     for start, length, ratio in bar_ranges:
         color = muted if ratio is None else down if ratio <= 0 else danger if ratio <= 0.35 else healthy
         attributed.addAttribute_value_range_(NSForegroundColorAttributeName, color, NSMakeRange(start, length))
@@ -1560,7 +1545,7 @@ class DiceRollView(NSView):
 
     def _draw_die(self, x: float, y: float, size: float, value: str, sides: int, active: bool):
         shadow = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(x + 5, y - 5, size, size), 10, 10)
-        ui_color(0.00, 0.00, 0.00, 0.38).set()
+        theme_color("app_bg", 0.42).set()
         shadow.fill()
 
         side = NSBezierPath.bezierPath()
@@ -1569,7 +1554,7 @@ class DiceRollView(NSView):
         side.lineToPoint_(NSMakePoint(x + size + 12, y + size - 8))
         side.lineToPoint_(NSMakePoint(x + size, y + size))
         side.closePath()
-        (ui_color(0.08, 0.55, 0.43, 1.0) if active else ui_color(0.22, 0.22, 0.24, 1.0)).set()
+        (theme_color("dice") if active else theme_color("surface")).set()
         side.fill()
 
         top = NSBezierPath.bezierPath()
@@ -1578,23 +1563,23 @@ class DiceRollView(NSView):
         top.lineToPoint_(NSMakePoint(x + size + 12, y + size + 10))
         top.lineToPoint_(NSMakePoint(x + size, y + size))
         top.closePath()
-        (ui_color(0.22, 0.95, 0.65, 1.0) if active else ui_color(0.40, 0.40, 0.43, 1.0)).set()
+        (ui_color(0.48, 0.84, 0.56, 1.0) if active else theme_color("surface_hover")).set()
         top.fill()
 
         face = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(x, y, size, size), 10, 10)
-        (ui_color(0.10, 0.80, 0.56, 1.0) if active else ui_color(0.30, 0.30, 0.33, 1.0)).set()
+        (ui_color(0.28, 0.70, 0.46, 1.0) if active else theme_color("surface")).set()
         face.fill()
-        ui_color(0.80, 1.0, 0.88, 1.0).set()
+        ui_color(0.74, 0.95, 0.78, 1.0).set()
         face.setLineWidth_(1.5)
         face.stroke()
 
-        self._draw_text(str(value), NSMakeRect(x + 4, y + 4, size - 8, size - 8), 19, NSColor.whiteColor(), True, True)
-        self._draw_text(f"d{sides}", NSMakeRect(x + 4, y + size - 16, size - 8, 12), 8, ui_color(0.85, 1.0, 0.90, 0.78), False, True)
+        self._draw_text(str(value), NSMakeRect(x + 4, y + 4, size - 8, size - 8), 19, theme_color("text_strong"), True, True)
+        self._draw_text(f"d{sides}", NSMakeRect(x + 4, y + size - 16, size - 8, 12), 8, theme_color("text", 0.78), False, True)
 
     def drawRect_(self, _rect):
         bounds = self.bounds()
         background = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bounds, 16, 16)
-        ui_color(0.035, 0.035, 0.04, 0.96).set()
+        theme_color("panel_alt", 0.96).set()
         background.fill()
 
         result = self.roll_result
@@ -1602,7 +1587,7 @@ class DiceRollView(NSView):
             return
 
         rolling = self.frame_index < 14
-        title_color = ui_color(0.58, 0.95, 0.28, 1.0)
+        title_color = theme_color("dice")
         self._draw_text(f"Rolling {result.expression}", NSMakeRect(20, bounds.size.height - 48, bounds.size.width - 40, 26), 16, title_color, True)
 
         dice_to_draw = min(result.count, 24)
@@ -1628,7 +1613,7 @@ class DiceRollView(NSView):
             self._draw_die(die_x, die_y + wobble, die_size, value, result.sides, rolling or value != "?")
 
         if result.count > dice_to_draw:
-            self._draw_text(f"+ {result.count - dice_to_draw} more dice included in the total", NSMakeRect(24, 80, bounds.size.width - 48, 20), 12, ui_color(0.70, 0.70, 0.74, 1.0), False, True)
+            self._draw_text(f"+ {result.count - dice_to_draw} more dice included in the total", NSMakeRect(24, 80, bounds.size.width - 48, 20), 12, theme_color("muted"), False, True)
 
         if not rolling:
             dice_sum = sum(result.rolls)
@@ -1636,8 +1621,8 @@ class DiceRollView(NSView):
             if result.modifier:
                 sign = "+" if result.modifier > 0 else "-"
                 details = f"{details} {sign} {abs(result.modifier)}"
-            self._draw_text(f"Total: {result.total}", NSMakeRect(24, 32, bounds.size.width - 48, 34), 24, NSColor.whiteColor(), True, True)
-            self._draw_text(details, NSMakeRect(24, 16, bounds.size.width - 48, 20), 12, ui_color(0.72, 0.72, 0.76, 1.0), False, True)
+            self._draw_text(f"Total: {result.total}", NSMakeRect(24, 32, bounds.size.width - 48, 34), 24, theme_color("text_strong"), True, True)
+            self._draw_text(details, NSMakeRect(24, 16, bounds.size.width - 48, 20), 12, theme_color("muted"), False, True)
 
 
 class DiceRollAnimator(NSObject):
@@ -1670,7 +1655,7 @@ class DiceRollAnimator(NSObject):
         self.panel.setFloatingPanel_(True)
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setLevel_(24)
-        self.panel.setBackgroundColor_(ui_color(0.035, 0.035, 0.04, 0.96))
+        self.panel.setBackgroundColor_(theme_color("panel_alt", 0.96))
         self.view = DiceRollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
         self.panel.setContentView_(self.view)
         self.panel.orderOut_(None)
@@ -1843,6 +1828,12 @@ class Dice3DRollerController(NSObject):
     def webView_didFailProvisionalNavigation_withError_(self, _web_view, _navigation, error):
         log(f"3D dice web view provisional navigation failed: {error}")
 
+    @objc.python_method
+    def applyTheme(self):
+        payload = json.dumps(dice_theme_payload())
+        script = f"if (window.arcaneApplyTheme) {{ window.arcaneApplyTheme({payload}); }}"
+        self.web_view.evaluateJavaScript_completionHandler_(script, None)
+
     def showRoll_target_(self, expression: str, target):
         self.result_target = target
         self.pending_expression = str(expression).strip()
@@ -1856,6 +1847,7 @@ class Dice3DRollerController(NSObject):
     @objc.python_method
     def evaluateRollExpression(self, expression: str):
         script = (
+            f"if (window.arcaneApplyTheme) {{ window.arcaneApplyTheme({json.dumps(dice_theme_payload())}); }};"
             "if (window.arcanePrepareRoll) { window.arcanePrepareRoll(); }"
             f"window.arcaneRoll({json.dumps(expression)});"
         )
@@ -1876,6 +1868,7 @@ class Dice3DRollerController(NSObject):
         message_type = str(payload.get("type", ""))
         if message_type == "ready":
             self.ready = True
+            self.applyTheme()
             if self.pending_expression:
                 self.evaluateRollExpression(self.pending_expression)
             return
@@ -1926,30 +1919,6 @@ def show_3d_dice_roll(expression: str, target) -> bool:
         APP_RETAINED_OBJECTS.append(THREE_D_DICE_ROLLER)
     THREE_D_DICE_ROLLER.showRoll_target_(str(expression), target)
     return True
-
-
-def find_spell_in_text(text: str, lookup: dict[str, Spell]) -> Spell | None:
-    exact_match = find_exact_spell_in_text(text, lookup)
-    if exact_match is not None:
-        return exact_match
-
-    return find_fuzzy_spell_in_text(normalize_transcript_for_matching(text), lookup)
-
-
-def find_exact_spell_in_text(text: str, lookup: dict[str, Spell]) -> Spell | None:
-    normalized = f" {normalize_transcript_for_matching(text)} "
-    best_match: tuple[int, int, Spell] | None = None
-    for alias, spell in lookup.items():
-        needle = f" {alias} "
-        index = normalized.rfind(needle)
-        if index < 0:
-            continue
-        candidate = (len(alias), index, spell)
-        if best_match is None or candidate[:2] > best_match[:2]:
-            best_match = candidate
-    if best_match:
-        return best_match[2]
-    return None
 
 
 SPELL_LEVEL_ORDER = (
@@ -2040,51 +2009,6 @@ def search_spells(
     return results if limit is None else results[:limit]
 
 
-def find_fuzzy_spell_in_text(normalized_text: str, lookup: dict[str, Spell]) -> Spell | None:
-    words = normalized_text.split()
-    if len(words) < 2:
-        return None
-
-    best_match: tuple[float, int, Spell, str, str] | None = None
-    for alias, spell in lookup.items():
-        alias_words = alias.split()
-        if len(alias_words) < 2:
-            continue
-
-        for size in range(max(1, len(alias_words) - 1), len(alias_words) + 2):
-            if size > len(words):
-                continue
-            for start in range(0, len(words) - size + 1):
-                candidate = " ".join(words[start : start + size])
-                if alias.startswith(candidate) and len(candidate) < len(alias):
-                    continue
-                shared_tokens = set(alias_words) & set(candidate.split())
-                if not shared_tokens:
-                    continue
-                score = SequenceMatcher(None, alias, candidate).ratio()
-                threshold = 0.88 if len(alias) >= 9 else 0.92
-                if score < threshold:
-                    continue
-                ranked = (score, start, spell, alias, candidate)
-                if best_match is None or ranked[:2] > best_match[:2]:
-                    best_match = ranked
-
-        compact_alias = alias.replace(" ", "")
-        compact_text = normalized_text.replace(" ", "")
-        if len(compact_alias) >= 8 and len(words) >= 2 and compact_text:
-            compact_score = SequenceMatcher(None, compact_alias, compact_text).ratio()
-            if compact_score >= 0.90:
-                ranked = (compact_score, len(words), spell, alias, normalized_text)
-                if best_match is None or ranked[:2] > best_match[:2]:
-                    best_match = ranked
-
-    if best_match:
-        score, _start, spell, alias, candidate = best_match
-        log(f"Fuzzy match: {spell.name} ({candidate!r} ~= {alias!r}, {score:.2f})")
-        return spell
-    return None
-
-
 def log(message: str, persist: bool = True):
     line = f"[Arcane Manager] {message}"
     print(line, flush=True)
@@ -2104,7 +2028,7 @@ def log(message: str, persist: bool = True):
 def make_label(text: str, frame: tuple[int, int, int, int], size: float, bold: bool = False):
     label = NSTextField.labelWithString_(text)
     label.setFrame_(NSMakeRect(*frame))
-    label.setTextColor_(NSColor.whiteColor())
+    label.setTextColor_(theme_color("text_strong"))
     label.setDrawsBackground_(False)
     label.setEditable_(False)
     label.setSelectable_(False)
@@ -2120,6 +2044,11 @@ def make_multiline(label: NSTextField):
 
 def ui_color(red: float, green: float, blue: float, alpha: float = 1.0):
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha)
+
+
+def theme_color(name: str, alpha: float = 1.0):
+    red, green, blue = THEME_RGB[name]
+    return ui_color(red, green, blue, alpha)
 
 
 def condition_color(condition: str, alpha: float = 1.0):
@@ -2183,13 +2112,13 @@ def style_text_input(field):
     field.setCell_(cell)
     field.setEditable_(True)
     field.setSelectable_(True)
-    field.setBackgroundColor_(ui_color(0.075, 0.075, 0.080, 1.0))
+    field.setBackgroundColor_(theme_color("surface_soft"))
     field.setFocusRingType_(1)
-    field.setTextColor_(ui_color(0.88, 0.88, 0.90, 1.0))
+    field.setTextColor_(theme_color("text"))
     field.setFont_(NSFont.systemFontOfSize_(14))
     field.setUsesSingleLineMode_(True)
     field.cell().setScrollable_(True)
-    style_layer(field, ui_color(0.075, 0.075, 0.080, 1.0), ui_color(0.25, 0.25, 0.28, 1.0), 8, 1)
+    style_layer(field, theme_color("surface_soft"), theme_color("border"), 8, 1)
 
 
 def style_number_input(field):
@@ -2204,19 +2133,19 @@ def style_number_input(field):
     field.setEditable_(True)
     field.setSelectable_(True)
     field.setAlignment_(1)
-    field.setBackgroundColor_(ui_color(0.105, 0.105, 0.112, 1.0))
+    field.setBackgroundColor_(theme_color("surface"))
     field.setFocusRingType_(1)
-    field.setTextColor_(ui_color(0.90, 0.90, 0.92, 1.0))
+    field.setTextColor_(theme_color("text"))
     field.setFont_(NSFont.systemFontOfSize_(15))
     field.setUsesSingleLineMode_(True)
     field.cell().setScrollable_(True)
-    style_layer(field, ui_color(0.105, 0.105, 0.112, 1.0), ui_color(0.30, 0.30, 0.33, 1.0), 8, 1)
+    style_layer(field, theme_color("surface"), theme_color("border"), 8, 1)
 
 
 def draw_text(text: str, x: float, y: float, size: float = 13, color=None, bold: bool = False):
     attributes = {
         NSFontAttributeName: NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size),
-        NSForegroundColorAttributeName: color or NSColor.whiteColor(),
+        NSForegroundColorAttributeName: color or theme_color("text_strong"),
     }
     NSString.stringWithString_(str(text)).drawAtPoint_withAttributes_(NSMakePoint(x, y), attributes)
 
@@ -2224,7 +2153,7 @@ def draw_text(text: str, x: float, y: float, size: float = 13, color=None, bold:
 def text_attributes(size: float = 13, color=None, bold: bool = False):
     return {
         NSFontAttributeName: NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size),
-        NSForegroundColorAttributeName: color or NSColor.whiteColor(),
+        NSForegroundColorAttributeName: color or theme_color("text_strong"),
     }
 
 
@@ -2430,8 +2359,8 @@ class SearchResultButton(NSButton):
     def drawRect_(self, _rect):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
-        fill = ui_color(0.155, 0.155, 0.168, 1.0) if highlighted else ui_color(0.105, 0.105, 0.115, 1.0)
-        stroke = ui_color(0.33, 0.33, 0.36, 1.0) if highlighted else ui_color(0.22, 0.22, 0.24, 1.0)
+        fill = theme_color("surface_hover") if highlighted else theme_color("surface_soft")
+        stroke = theme_color("border") if highlighted else theme_color("border_soft")
         draw_rounded_rect(
             NSMakeRect(0.5, 0.5, max(1, bounds.size.width - 1), max(1, bounds.size.height - 1)),
             fill,
@@ -2451,8 +2380,8 @@ class SearchResultButton(NSButton):
 
     def _drawMonsterResult_(self, bounds):
         width = bounds.size.width
-        primary = ui_color(0.94, 0.94, 0.95, 1.0)
-        muted = ui_color(0.66, 0.66, 0.68, 1.0)
+        primary = theme_color("text_strong")
+        muted = theme_color("muted")
         name_attrs = text_attributes(14, primary, True)
         meta_attrs = text_attributes(12.5, muted, True)
         hp_text = self.hp_text.replace("HP ", "HP: ")
@@ -2478,9 +2407,9 @@ class SearchResultButton(NSButton):
 
     def _drawSpellResult_(self, bounds):
         width = bounds.size.width
-        primary = ui_color(0.86, 0.86, 0.88, 1.0)
-        muted = ui_color(0.66, 0.66, 0.69, 1.0)
-        gold = ui_color(1.0, 0.82, 0.26, 1.0)
+        primary = theme_color("text")
+        muted = theme_color("muted")
+        gold = theme_color("gold")
         draw_fitted_text(self.primary_text, NSMakeRect(14, 7, width - 28, 17), 13.5, primary, True)
         if width >= 340 and self.meta_text:
             meta_w = min(172, max(120, width * 0.40))
@@ -2499,13 +2428,13 @@ class SearchResultButton(NSButton):
 def color_from_hex(value: str, fallback=None):
     text = str(value or "").strip().lstrip("#")
     if len(text) != 6:
-        return fallback or ui_color(0.86, 0.86, 0.88, 1.0)
+        return fallback or theme_color("text")
     try:
         red = int(text[0:2], 16) / 255.0
         green = int(text[2:4], 16) / 255.0
         blue = int(text[4:6], 16) / 255.0
     except ValueError:
-        return fallback or ui_color(0.86, 0.86, 0.88, 1.0)
+        return fallback or theme_color("text")
     return ui_color(red, green, blue, 1.0)
 
 
@@ -2563,9 +2492,9 @@ class AdventureTreeButton(NSButton):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
         if self.is_selected:
-            fill = ui_color(0.28, 0.47, 0.82, 1.0)
+            fill = theme_color("selection")
         elif highlighted:
-            fill = ui_color(0.14, 0.15, 0.17, 1.0)
+            fill = theme_color("surface_hover")
         else:
             fill = None
         if fill is not None:
@@ -2579,10 +2508,10 @@ class AdventureTreeButton(NSButton):
 
         indent = 10 + int(self.depth) * 18
         text_x = indent + 20
-        text_color = color_from_hex(self.color_hex, ui_color(0.84, 0.84, 0.86, 1.0))
+        text_color = color_from_hex(self.color_hex, theme_color("text"))
         if self.is_selected:
-            text_color = ui_color(0.96, 0.96, 0.98, 1.0)
-        muted = ui_color(0.52, 0.54, 0.58, 1.0)
+            text_color = theme_color("text_strong")
+        muted = theme_color("muted")
 
         if self.is_dir:
             arrow = "⌄" if self.is_expanded else "›"
@@ -2630,12 +2559,12 @@ class StatBlockAbilityButton(NSButton):
     def drawRect_(self, _rect):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
-        fill = ui_color(0.070, 0.070, 0.078, 1.0)
-        stroke = ui_color(0.50, 0.50, 0.54, 1.0) if highlighted else ui_color(0.36, 0.36, 0.39, 1.0)
-        circle_fill = ui_color(0.090, 0.090, 0.100, 1.0)
-        text = ui_color(0.94, 0.94, 0.95, 1.0)
-        muted = ui_color(0.68, 0.68, 0.71, 1.0)
-        green = ui_color(0.58, 0.95, 0.28, 1.0)
+        fill = theme_color("surface_soft")
+        stroke = theme_color("border") if highlighted else theme_color("border_soft")
+        circle_fill = theme_color("panel_alt")
+        text = theme_color("text_strong")
+        muted = theme_color("muted")
+        green = theme_color("dice")
 
         rect = self._bonusRect()
         draw_rounded_rect(rect, fill, stroke, 7, 1.25)
@@ -2682,9 +2611,9 @@ class RowAddButton(NSButton):
     def drawRect_(self, _rect):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
-        icon_color = ui_color(0.96, 0.96, 0.97, 1.0) if highlighted else ui_color(0.78, 0.78, 0.80, 1.0)
-        fill = ui_color(0.155, 0.155, 0.168, 1.0) if highlighted else ui_color(0.13, 0.13, 0.14, 1.0)
-        stroke = ui_color(0.33, 0.33, 0.36, 1.0) if highlighted else ui_color(0.24, 0.24, 0.25, 1.0)
+        icon_color = theme_color("text_strong") if highlighted else theme_color("text")
+        fill = theme_color("surface_hover") if highlighted else theme_color("surface")
+        stroke = theme_color("border") if highlighted else theme_color("border_soft")
         side = min(30, bounds.size.width, bounds.size.height)
         draw_rounded_rect(
             NSMakeRect((bounds.size.width - side) / 2, (bounds.size.height - side) / 2, side, side),
@@ -2716,8 +2645,8 @@ class StyledPopUpButton(NSPopUpButton):
     def drawRect_(self, _rect):
         bounds = self.bounds()
         highlighted = self.isHighlighted()
-        fill = ui_color(0.115, 0.115, 0.122, 1.0) if highlighted else ui_color(0.095, 0.095, 0.102, 1.0)
-        stroke = ui_color(0.34, 0.34, 0.36, 1.0) if highlighted else ui_color(0.24, 0.24, 0.26, 1.0)
+        fill = theme_color("surface_hover") if highlighted else theme_color("surface")
+        stroke = theme_color("border") if highlighted else theme_color("border_soft")
         draw_rounded_rect(
             NSMakeRect(0.5, 0.5, max(1, bounds.size.width - 1), max(1, bounds.size.height - 1)),
             fill,
@@ -2727,8 +2656,8 @@ class StyledPopUpButton(NSPopUpButton):
         )
         item = self.selectedItem()
         title = str(item.title()) if item is not None else str(self.title())
-        draw_fitted_text(title, NSMakeRect(12, 8, max(20, bounds.size.width - 42), 18), 13, ui_color(0.88, 0.88, 0.90, 1.0), True)
-        draw_right_fitted_text("⌄", NSMakeRect(bounds.size.width - 28, 7, 16, 18), 14, ui_color(0.66, 0.66, 0.69, 1.0), True)
+        draw_fitted_text(title, NSMakeRect(12, 8, max(20, bounds.size.width - 42), 18), 13, theme_color("text"), True)
+        draw_right_fitted_text("⌄", NSMakeRect(bounds.size.width - 28, 7, 16, 18), 14, theme_color("muted"), True)
 
 
 MONSTER_RESULT_ROW_HEIGHT = 42
@@ -2863,19 +2792,18 @@ class CombatTrackerView(NSView):
 
     def drawRect_(self, _rect):
         bounds = self.bounds()
-        ui_color(0.015, 0.015, 0.017, 1.0).set()
+        theme_color("panel").set()
         NSBezierPath.bezierPathWithRect_(bounds).fill()
 
-        muted = ui_color(0.48, 0.48, 0.50, 1.0)
-        card_fill = ui_color(0.075, 0.075, 0.078, 1.0)
-        card_border = ui_color(0.17, 0.17, 0.18, 1.0)
-        current_border = ui_color(0.55, 0.55, 0.57, 1.0)
-        green = ui_color(0.10, 0.78, 0.52, 1.0)
-        temp_blue = ui_color(0.20, 0.58, 0.95, 1.0)
-        pink = ui_color(1.0, 0.18, 0.39, 1.0)
-        red = ui_color(0.55, 0.12, 0.18, 1.0)
-        dead_red = ui_color(0.98, 0.22, 0.30, 1.0)
-        white = NSColor.whiteColor()
+        muted = theme_color("muted")
+        card_border = theme_color("border_soft")
+        current_border = theme_color("border")
+        green = theme_color("dice")
+        temp_blue = theme_color("blue_temp")
+        pink = theme_color("monster")
+        red = theme_color("danger")
+        dead_red = theme_color("danger")
+        white = theme_color("text_strong")
 
         left = 24
         width = bounds.size.width - 48
@@ -2924,7 +2852,7 @@ class CombatTrackerView(NSView):
             is_down = self._hp_values(combatant)[0] is not None and self._hp_values(combatant)[0] <= 0
             is_dead = combatant_is_dead(combatant)
             conditions = normalized_conditions(combatant)
-            row_fill = ui_color(0.09, 0.09, 0.095, 0.62 if is_down else 1.0)
+            row_fill = theme_color("surface_soft", 0.62 if is_down else 1.0)
             if conditions and not is_down:
                 tint_source = condition_color(conditions[0], 1.0)
                 row_fill = tint_source.colorWithAlphaComponent_(0.18)
@@ -2966,8 +2894,8 @@ class CombatTrackerView(NSView):
                 self.hp_button_rects.append((hp_button_rect, index))
                 draw_rounded_rect(
                     hp_button_rect,
-                    ui_color(0.115, 0.115, 0.122, 1.0),
-                    ui_color(0.30, 0.30, 0.33, 1.0),
+                    theme_color("surface"),
+                    theme_color("border"),
                     7,
                     1,
                 )
@@ -2990,12 +2918,12 @@ class CombatTrackerView(NSView):
                             (bar_w * hp_ratio, fill_color),
                             (bar_w * temp_ratio, temp_blue),
                         ],
-                        ui_color(0.22, 0.22, 0.23, 1.0),
+                        theme_color("panel_alt"),
                         4,
                     )
                     hp_text = f"{current_hp}/{max_hp}"
                 else:
-                    draw_segmented_rounded_bar(bar_rect, [], ui_color(0.22, 0.22, 0.23, 1.0), 4)
+                    draw_segmented_rounded_bar(bar_rect, [], theme_color("panel_alt"), 4)
                     hp_text = "-"
                 draw_right_fitted_text_centered(hp_text, NSMakeRect(hp_text_x, bar_y, hp_text_w, bar_h), 12, muted, False)
             else:
@@ -3009,8 +2937,8 @@ class CombatTrackerView(NSView):
             self.status_rects.append((status_rect, index))
             draw_rounded_rect(
                 status_rect,
-                ui_color(0.115, 0.115, 0.122, 0.88 if not is_down else 0.52),
-                ui_color(0.26, 0.26, 0.28, 1.0),
+                theme_color("surface", 0.88 if not is_down else 0.52),
+                theme_color("border_soft"),
                 7,
                 1,
             )
@@ -3038,7 +2966,6 @@ class MainWindowController(NSObject):
     creatures: list[Creature]
     spells: list[Spell]
     spell_lookup: dict[str, Spell]
-    overlay: Any
     parties: list[dict[str, Any]]
     combatants: list[dict[str, Any]]
     monster_results: list[Creature]
@@ -3160,7 +3087,7 @@ class MainWindowController(NSObject):
     party_status_label: NSTextField
     turn_label: NSTextField
 
-    def initWithBestiary_spells_spellLookup_overlay_(self, creatures, spells, spell_lookup, overlay):
+    def initWithBestiary_spells_spellLookup_(self, creatures, spells, spell_lookup):
         self = objc.super(MainWindowController, self).init()
         if self is None:
             return None
@@ -3168,7 +3095,6 @@ class MainWindowController(NSObject):
         self.creatures = list(creatures)
         self.spells = list(spells)
         self.spell_lookup = dict(spell_lookup)
-        self.overlay = overlay
         self.parties = self.loadParties()
         self.combatants = []
         self.monster_results = []
@@ -3241,16 +3167,16 @@ class MainWindowController(NSObject):
         self.window.setTitle_("Arcane Manager")
         self.window.setMinSize_(NSMakeSize(1060, 660))
         self.window.setDelegate_(self)
-        self.window.setBackgroundColor_(ui_color(0.05, 0.05, 0.055, 1.0))
+        self.window.setBackgroundColor_(theme_color("app_bg"))
 
         self.content_view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        style_layer(self.content_view, ui_color(0.05, 0.05, 0.055, 1.0), None, 0)
+        style_layer(self.content_view, theme_color("app_bg"), None, 0)
         self.initiative_tab_button = self._make_button("Initiative Tracker", (20, height - 38, 150, 30), "showInitiativeTab:")
         self.spells_tab_button = self._make_button("Spells", (178, height - 38, 86, 30), "showSpellsTab:")
         self.dice_tab_button = self._make_button("Dice Roller", (272, height - 38, 112, 30), "showDiceTab:")
         self.adventure_tab_button = self._make_button("Adventure", (392, height - 38, 104, 30), "showAdventureTab:")
         self.sidebar_panel = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, height))
-        style_layer(self.sidebar_panel, ui_color(0.075, 0.075, 0.078, 1.0), None, 0)
+        style_layer(self.sidebar_panel, theme_color("panel_alt"), None, 0)
         self.sidebar_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, height))
         self.sidebar_scroll.setHasVerticalScroller_(True)
         self.sidebar_scroll.setAutohidesScrollers_(False)
@@ -3259,16 +3185,16 @@ class MainWindowController(NSObject):
         self.sidebar_content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, height))
         self.sidebar_scroll.setDocumentView_(self.sidebar_content)
         self.combat_panel = NSView.alloc().initWithFrame_(NSMakeRect(360, 24, 896, height - 48))
-        style_layer(self.combat_panel, ui_color(0.015, 0.015, 0.017, 1.0), ui_color(0.12, 0.12, 0.13, 1.0), 14, 1)
+        style_layer(self.combat_panel, theme_color("panel"), theme_color("border_soft"), 14, 1)
         self.spell_panel = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, width - 40, height - 74))
-        style_layer(self.spell_panel, ui_color(0.015, 0.015, 0.017, 1.0), ui_color(0.12, 0.12, 0.13, 1.0), 14, 1)
+        style_layer(self.spell_panel, theme_color("panel"), theme_color("border_soft"), 14, 1)
         self.dice_panel = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, width - 40, height - 74))
-        style_layer(self.dice_panel, ui_color(0.015, 0.015, 0.017, 1.0), ui_color(0.12, 0.12, 0.13, 1.0), 14, 1)
+        style_layer(self.dice_panel, theme_color("panel"), theme_color("border_soft"), 14, 1)
         self.adventure_panel = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, width - 40, height - 74))
-        style_layer(self.adventure_panel, ui_color(0.015, 0.015, 0.017, 1.0), ui_color(0.12, 0.12, 0.13, 1.0), 14, 1)
+        style_layer(self.adventure_panel, theme_color("panel"), theme_color("border_soft"), 14, 1)
 
         self.monster_sheet_drawer = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, height - 48))
-        style_layer(self.monster_sheet_drawer, ui_color(0.055, 0.055, 0.062, 1.0), ui_color(0.18, 0.18, 0.19, 1.0), 12, 1)
+        style_layer(self.monster_sheet_drawer, theme_color("panel_alt"), theme_color("border_soft"), 12, 1)
         self.monster_sheet_drawer.setHidden_(True)
         self.monster_sheet_title = make_label("", (0, 0, 260, 36), 24, True)
         self.monster_sheet_title.setUsesSingleLineMode_(True)
@@ -3278,7 +3204,7 @@ class MainWindowController(NSObject):
         self.monster_sheet_hp_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 72, 26))
         self.monster_sheet_save_button = self._make_button("Save HP", (0, 0, 84, 26), "saveMonsterHp:")
         self.monster_sheet_roll_label = make_label("", (0, 0, 300, 22), 12, True)
-        self.monster_sheet_roll_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
+        self.monster_sheet_roll_label.setTextColor_(theme_color("dice"))
         self.monster_sheet_hp_label.setHidden_(True)
         self.monster_sheet_hp_field.setHidden_(True)
         self.monster_sheet_save_button.setHidden_(True)
@@ -3294,7 +3220,7 @@ class MainWindowController(NSObject):
         self.monster_sheet_scroll.setBorderType_(0)
         self.monster_sheet_body = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 400))
         self.monster_sheet_body.setFont_(NSFont.systemFontOfSize_(13))
-        self.monster_sheet_body.setTextColor_(NSColor.whiteColor())
+        self.monster_sheet_body.setTextColor_(theme_color("text"))
         self.monster_sheet_body.setRollTarget_(self)
         self.monster_sheet_body.setSpellTarget_(self)
         self.monster_sheet_scroll.setDocumentView_(self.monster_sheet_body)
@@ -3309,23 +3235,23 @@ class MainWindowController(NSObject):
 
         self.notes_title = make_label("Initiative Tracker", (0, 0, 220, 28), 18, True)
         self.notes_hint = make_label("Combat Round Tracker", (0, 0, 220, 20), 12)
-        self.notes_hint.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.notes_hint.setTextColor_(theme_color("muted"))
         self.sidebar_logo_label = make_label("✦", (0, 0, 36, 36), 20, True)
         self.sidebar_logo_label.setAlignment_(1)
-        style_layer(self.sidebar_logo_label, ui_color(0.12, 0.39, 0.74, 1.0), ui_color(0.18, 0.46, 0.84, 1.0), 10, 1)
+        style_layer(self.sidebar_logo_label, theme_color("selection"), theme_color("link"), 10, 1)
         self.notes_title.setHidden_(True)
         self.notes_hint.setHidden_(True)
         self.sidebar_logo_label.setHidden_(True)
         self.sidebar_footer_label = make_label("", (0, 0, 300, 24), 13)
-        self.sidebar_footer_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.sidebar_footer_label.setTextColor_(theme_color("muted"))
         self.sidebar_footer_label.setHidden_(True)
         self.notes_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.notes_scroll.setHasVerticalScroller_(True)
         self.notes_scroll.setAutohidesScrollers_(False)
         self.notes_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.notes_view.setFont_(NSFont.systemFontOfSize_(14))
-        self.notes_view.setTextColor_(NSColor.whiteColor())
-        self.notes_view.setBackgroundColor_(ui_color(0.11, 0.11, 0.13, 1.0))
+        self.notes_view.setTextColor_(theme_color("text"))
+        self.notes_view.setBackgroundColor_(theme_color("surface"))
         self.notes_scroll.setDocumentView_(self.notes_view)
         self.notes_scroll.setHidden_(True)
 
@@ -3341,7 +3267,7 @@ class MainWindowController(NSObject):
         self.start_fight_button.setToolTip_("Add party to initiative")
 
         self.party_status_label = make_multiline(make_label("", (0, 0, 300, 40), 11))
-        self.party_status_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
+        self.party_status_label.setTextColor_(theme_color("muted"))
 
         for _index in range(6):
             icon_view = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 20, 20))
@@ -3349,7 +3275,7 @@ class MainWindowController(NSObject):
             self.party_member_icon_views.append(icon_view)
             label = make_label("", (0, 0, 100, 38), 13, True)
             label.setHidden_(True)
-            style_layer(label, ui_color(0.12, 0.12, 0.125, 1.0), ui_color(0.23, 0.23, 0.24, 1.0), 8, 1)
+            style_layer(label, theme_color("surface"), theme_color("border_soft"), 8, 1)
             self.party_member_labels.append(label)
             name_label = make_label("", (0, 0, 80, 20), 13, True)
             class_label = make_label("", (0, 0, 80, 20), 12, True)
@@ -3416,25 +3342,25 @@ class MainWindowController(NSObject):
             NSItalicFontMask,
         )
         self.spell_detail_italian_label.setFont_(italic_font)
-        self.spell_detail_italian_label.setTextColor_(ui_color(0.78, 0.78, 0.82, 1.0))
+        self.spell_detail_italian_label.setTextColor_(theme_color("muted"))
         self.spell_detail_italian_label.setLineBreakMode_(4)
         self.spell_detail_meta_label = make_label("", (0, 0, 320, 24), 15, True)
-        self.spell_detail_meta_label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+        self.spell_detail_meta_label.setTextColor_(theme_color("gold"))
         self.spell_detail_meta_label.setLineBreakMode_(4)
         self.spell_components_label = make_label("Components", (0, 0, 100, 22), 13, True)
-        self.spell_components_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_components_label.setTextColor_(theme_color("text"))
         self.spell_v_label = make_label("V", (0, 0, 14, 20), 13, True)
         self.spell_s_label = make_label("S", (0, 0, 14, 20), 13, True)
         self.spell_m_label = make_label("M", (0, 0, 16, 20), 13, True)
         for label in (self.spell_v_label, self.spell_s_label, self.spell_m_label):
-            label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+            label.setTextColor_(theme_color("gold"))
         self.spell_v_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
         self.spell_s_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
         self.spell_m_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
         self.spell_component_material_label = make_multiline(make_label("", (0, 0, 320, 36), 13))
-        self.spell_component_material_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_component_material_label.setTextColor_(theme_color("text"))
         self.spell_stats_label = make_multiline(make_label("", (0, 0, 320, 42), 13))
-        self.spell_stats_label.setTextColor_(ui_color(0.84, 0.84, 0.86, 1.0))
+        self.spell_stats_label.setTextColor_(theme_color("text"))
         self.spell_detail_header_views = [
             self.spell_detail_title_label,
             self.spell_detail_italian_label,
@@ -3456,36 +3382,36 @@ class MainWindowController(NSObject):
         self.spell_detail_scroll.setBorderType_(0)
         self.spell_detail_view = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_detail_view.setFont_(NSFont.systemFontOfSize_(13))
-        self.spell_detail_view.setTextColor_(NSColor.whiteColor())
+        self.spell_detail_view.setTextColor_(theme_color("text"))
         self.spell_detail_view.setRollTarget_(self)
         self.spell_detail_scroll.setDocumentView_(self.spell_detail_view)
 
         self.dice_title_label = make_label("Dice Roller", (0, 0, 240, 32), 24, True)
         self.dice_hint_label = make_label("", (0, 0, 720, 24), 13)
-        self.dice_hint_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.dice_hint_label.setTextColor_(theme_color("muted"))
         self.dice_hint_label.setHidden_(True)
         self.dice_control_labels = []
         self.dice_clear_button = self._make_button("Clear", (0, 0, 100, 34), "clearDicePool:")
         self.dice_roll_button = self._make_button("Roll Dice", (0, 0, 130, 34), "rollCustomDice:")
         self.dice_formula_label = make_label("Click a die", (0, 0, 520, 42), 30, True)
         self.dice_formula_label.setAlignment_(1)
-        self.dice_formula_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
+        self.dice_formula_label.setTextColor_(theme_color("dice"))
         self.dice_result_label = make_label("", (0, 0, 520, 24), 13, True)
         self.dice_result_label.setAlignment_(1)
-        self.dice_result_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.dice_result_label.setTextColor_(theme_color("muted"))
         self.dice_history_title_label = make_label("Recent Rolls", (0, 0, 220, 24), 16, True)
         self.dice_history_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 260))
         self.dice_history_scroll.setHasVerticalScroller_(True)
         self.dice_history_scroll.setAutohidesScrollers_(False)
         self.dice_history_scroll.setDrawsBackground_(False)
         self.dice_history_scroll.setBorderType_(0)
-        style_layer(self.dice_history_scroll, ui_color(0.070, 0.070, 0.078, 1.0), ui_color(0.18, 0.18, 0.19, 1.0), 8, 1)
+        style_layer(self.dice_history_scroll, theme_color("surface_soft"), theme_color("border_soft"), 8, 1)
         self.dice_history_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 260))
         self.dice_history_view.setEditable_(False)
         self.dice_history_view.setSelectable_(True)
         self.dice_history_view.setFont_(NSFont.systemFontOfSize_(12))
-        self.dice_history_view.setTextColor_(ui_color(0.78, 0.78, 0.80, 1.0))
-        self.dice_history_view.setBackgroundColor_(ui_color(0.070, 0.070, 0.078, 1.0))
+        self.dice_history_view.setTextColor_(theme_color("text"))
+        self.dice_history_view.setBackgroundColor_(theme_color("surface_soft"))
         self.dice_history_view.setTextContainerInset_(NSMakeSize(10, 10))
         self.dice_history_scroll.setDocumentView_(self.dice_history_view)
         self.refreshDiceHistory()
@@ -3497,19 +3423,19 @@ class MainWindowController(NSObject):
 
         self.adventure_title_label = make_label("Adventure", (0, 0, 360, 32), 24, True)
         self.adventure_status_label = make_label("Choose a folder of Markdown notes.", (0, 0, 520, 24), 13)
-        self.adventure_status_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.adventure_status_label.setTextColor_(theme_color("muted"))
         self.adventure_folder_button = self._make_button("Choose Folder", (0, 0, 132, 32), "chooseAdventureFolder:")
         self.adventure_toggle_button = self._make_button("Edit", (0, 0, 86, 32), "toggleAdventureMode:")
         self.adventure_save_button = self._make_button("Save", (0, 0, 82, 32), "saveAdventureNote:")
         self.adventure_dirty_label = make_label("", (0, 0, 120, 22), 12, True)
-        self.adventure_dirty_label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+        self.adventure_dirty_label.setTextColor_(theme_color("gold"))
 
         self.adventure_tree_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 420))
         self.adventure_tree_scroll.setHasVerticalScroller_(True)
         self.adventure_tree_scroll.setAutohidesScrollers_(False)
         self.adventure_tree_scroll.setDrawsBackground_(False)
         self.adventure_tree_scroll.setBorderType_(0)
-        style_layer(self.adventure_tree_scroll, ui_color(0.070, 0.073, 0.080, 1.0), ui_color(0.18, 0.19, 0.21, 1.0), 8, 1)
+        style_layer(self.adventure_tree_scroll, theme_color("surface_soft"), theme_color("border_soft"), 8, 1)
         self.adventure_tree_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 420))
         self.adventure_tree_scroll.setDocumentView_(self.adventure_tree_content)
 
@@ -3526,13 +3452,13 @@ class MainWindowController(NSObject):
         self.adventure_editor_scroll.setAutohidesScrollers_(False)
         self.adventure_editor_scroll.setDrawsBackground_(False)
         self.adventure_editor_scroll.setBorderType_(0)
-        style_layer(self.adventure_editor_scroll, ui_color(0.060, 0.062, 0.070, 1.0), ui_color(0.18, 0.19, 0.21, 1.0), 8, 1)
+        style_layer(self.adventure_editor_scroll, theme_color("surface_soft"), theme_color("border_soft"), 8, 1)
         self.adventure_editor_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 620, 420))
         self.adventure_editor_view.setEditable_(True)
         self.adventure_editor_view.setSelectable_(True)
         self.adventure_editor_view.setFont_(NSFont.monospacedSystemFontOfSize_weight_(13, 0))
-        self.adventure_editor_view.setTextColor_(ui_color(0.88, 0.88, 0.90, 1.0))
-        self.adventure_editor_view.setBackgroundColor_(ui_color(0.060, 0.062, 0.070, 1.0))
+        self.adventure_editor_view.setTextColor_(theme_color("text"))
+        self.adventure_editor_view.setBackgroundColor_(theme_color("surface_soft"))
         self.adventure_editor_view.setTextContainerInset_(NSMakeSize(14, 14))
         self.adventure_editor_view.textContainer().setLineFragmentPadding_(0)
         self.adventure_editor_view.setDelegate_(self)
@@ -3543,7 +3469,7 @@ class MainWindowController(NSObject):
         self.next_turn_button = self._make_button("Next", (0, 0, 100, 34), "nextTurn:")
         self.clear_tracker_button = self._make_button("Finish Combat", (0, 0, 130, 34), "clearTracker:")
         self.turn_label = make_label("", (0, 0, 300, 24), 13, True)
-        self.turn_label.setTextColor_(ui_color(1.0, 0.82, 0.26, 1.0))
+        self.turn_label.setTextColor_(theme_color("gold"))
         self.turn_label.setAlignment_(2)
         self.turn_label.setHidden_(True)
 
@@ -3705,8 +3631,108 @@ class MainWindowController(NSObject):
         button.setTarget_(self)
         button.setAction_(action)
         button.setBordered_(False)
-        style_layer(button, ui_color(0.13, 0.13, 0.14, 1.0), ui_color(0.24, 0.24, 0.25, 1.0), 8, 1)
+        style_layer(button, theme_color("surface"), theme_color("border_soft"), 8, 1)
         return button
+
+    @objc.python_method
+    def applyTheme(self):
+        self.window.setBackgroundColor_(theme_color("app_bg"))
+        style_layer(self.content_view, theme_color("app_bg"), None, 0)
+        style_layer(self.sidebar_panel, theme_color("panel_alt"), None, 0)
+        for panel in (self.combat_panel, self.spell_panel, self.dice_panel, self.adventure_panel):
+            style_layer(panel, theme_color("panel"), theme_color("border_soft"), 14, 1)
+        style_layer(self.monster_sheet_drawer, theme_color("panel_alt"), theme_color("border_soft"), 12, 1)
+        style_layer(self.sidebar_logo_label, theme_color("selection"), theme_color("link"), 10, 1)
+        for label in self.party_member_labels:
+            style_layer(label, theme_color("surface"), theme_color("border_soft"), 8, 1)
+        for scroll in (self.dice_history_scroll, self.adventure_tree_scroll, self.adventure_editor_scroll):
+            style_layer(scroll, theme_color("surface_soft"), theme_color("border_soft"), 8, 1)
+
+        for button in (
+            self.initiative_tab_button,
+            self.spells_tab_button,
+            self.dice_tab_button,
+            self.adventure_tab_button,
+            self.new_party_button,
+            self.edit_party_button,
+            self.delete_party_button,
+            self.start_fight_button,
+            self.monster_search_button,
+            self.dice_clear_button,
+            self.dice_roll_button,
+            self.adventure_folder_button,
+            self.adventure_toggle_button,
+            self.adventure_save_button,
+            self.previous_turn_button,
+            self.next_turn_button,
+            self.clear_tracker_button,
+            self.monster_sheet_close_button,
+            self.monster_sheet_save_button,
+            *self.dice_preset_buttons,
+        ):
+            if button is not None:
+                style_layer(button, theme_color("surface"), theme_color("border_soft"), 8, 1)
+
+        for field in (self.monster_search_field, self.spell_search_field):
+            style_text_input(field)
+        for popup in (
+            self.party_popup,
+            self.monster_cr_filter_popup,
+            self.spell_level_filter_popup,
+            self.spell_school_filter_popup,
+        ):
+            popup.setNeedsDisplay_(True)
+
+        muted_labels = (
+            self.notes_hint,
+            self.sidebar_footer_label,
+            self.party_status_label,
+            self.spell_detail_italian_label,
+            self.dice_hint_label,
+            self.dice_result_label,
+            self.adventure_status_label,
+        )
+        for label in muted_labels:
+            label.setTextColor_(theme_color("muted"))
+        for label in (self.spell_detail_meta_label, self.turn_label, self.adventure_dirty_label):
+            label.setTextColor_(theme_color("gold"))
+        for label in (
+            self.spell_components_label,
+            self.spell_component_material_label,
+            self.spell_stats_label,
+        ):
+            label.setTextColor_(theme_color("text"))
+        for label in (self.spell_v_label, self.spell_s_label, self.spell_m_label):
+            label.setTextColor_(theme_color("gold"))
+        self.monster_sheet_roll_label.setTextColor_(theme_color("dice"))
+        self.dice_formula_label.setTextColor_(theme_color("dice"))
+
+        self.notes_view.setTextColor_(theme_color("text"))
+        self.notes_view.setBackgroundColor_(theme_color("surface"))
+        self.dice_history_view.setTextColor_(theme_color("text"))
+        self.dice_history_view.setBackgroundColor_(theme_color("surface_soft"))
+        self.adventure_editor_view.setTextColor_(theme_color("text"))
+        self.adventure_editor_view.setBackgroundColor_(theme_color("surface_soft"))
+        self.spell_detail_view.setTextColor_(theme_color("text"))
+        self.monster_sheet_body.setTextColor_(theme_color("text"))
+
+        for collection in (
+            self.monster_result_buttons,
+            self.monster_add_buttons,
+            self.spell_result_buttons,
+            self.adventure_tree_buttons,
+            self.monster_sheet_ability_buttons,
+        ):
+            for view in collection:
+                view.setNeedsDisplay_(True)
+        self.tracker_view.setNeedsDisplay_(True)
+        self.applyCurrentTab()
+        if self.adventure_is_editing:
+            self.refreshAdventureControls()
+        elif self.adventure_selected_note is not None:
+            self.renderAdventureMarkdown_(self.adventure_last_saved_text)
+        else:
+            self.refreshAdventureWorkspace()
 
     def layoutMainWindow(self):
         bounds = self.content_view.bounds()
@@ -4068,29 +4094,29 @@ class MainWindowController(NSObject):
             self.adventure_editor_scroll.setHidden_(not self.adventure_is_editing)
         style_layer(
             self.initiative_tab_button,
-            ui_color(0.20, 0.20, 0.22, 1.0) if show_initiative else ui_color(0.10, 0.10, 0.11, 1.0),
-            ui_color(0.30, 0.30, 0.32, 1.0),
+            theme_color("surface_hover") if show_initiative else theme_color("surface_soft"),
+            theme_color("border"),
             8,
             1,
         )
         style_layer(
             self.spells_tab_button,
-            ui_color(0.20, 0.20, 0.22, 1.0) if show_spells else ui_color(0.10, 0.10, 0.11, 1.0),
-            ui_color(0.30, 0.30, 0.32, 1.0),
+            theme_color("surface_hover") if show_spells else theme_color("surface_soft"),
+            theme_color("border"),
             8,
             1,
         )
         style_layer(
             self.dice_tab_button,
-            ui_color(0.20, 0.20, 0.22, 1.0) if show_dice else ui_color(0.10, 0.10, 0.11, 1.0),
-            ui_color(0.30, 0.30, 0.32, 1.0),
+            theme_color("surface_hover") if show_dice else theme_color("surface_soft"),
+            theme_color("border"),
             8,
             1,
         )
         style_layer(
             self.adventure_tab_button,
-            ui_color(0.20, 0.20, 0.22, 1.0) if show_adventure else ui_color(0.10, 0.10, 0.11, 1.0),
-            ui_color(0.30, 0.30, 0.32, 1.0),
+            theme_color("surface_hover") if show_adventure else theme_color("surface_soft"),
+            theme_color("border"),
             8,
             1,
         )
@@ -4942,7 +4968,7 @@ class MainWindowController(NSObject):
         document = (
             "<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-            f"<style>{ADVENTURE_MARKDOWN_CSS}</style></head><body><main>{body}</main>{script}</body></html>"
+            f"<style>{adventure_markdown_css()}</style></head><body><main>{body}</main>{script}</body></html>"
         )
         base_url = NSURL.fileURLWithPath_(str(self.adventure_vault_path)) if self.adventure_vault_path is not None else None
         self.adventure_web_view.loadHTMLString_baseURL_(document, base_url)
@@ -5206,7 +5232,7 @@ class MainWindowController(NSObject):
         self.party_editor_panel.setFloatingPanel_(True)
         self.party_editor_panel.setHidesOnDeactivate_(False)
         self.party_editor_panel.setLevel_(24)
-        self.party_editor_panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.97))
+        self.party_editor_panel.setBackgroundColor_(theme_color("panel_alt", 0.97))
 
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
         title_label = make_label(title, (24, 362, 472, 28), 18, True)
@@ -5238,8 +5264,8 @@ class MainWindowController(NSObject):
         self.editor_character_list = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 448, 150))
         self.editor_character_list.setEditable_(False)
         self.editor_character_list.setFont_(NSFont.monospacedSystemFontOfSize_weight_(12, 0))
-        self.editor_character_list.setTextColor_(NSColor.whiteColor())
-        self.editor_character_list.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.15, 1.0))
+        self.editor_character_list.setTextColor_(theme_color("text"))
+        self.editor_character_list.setBackgroundColor_(theme_color("surface"))
         list_scroll.setDocumentView_(self.editor_character_list)
 
         save_button = self._make_button("Save Party", (284, 24, 100, 30), "saveEditorParty:")
@@ -5544,7 +5570,7 @@ class MainWindowController(NSObject):
         self.showSpellInDetail_(self.displayed_spells[index])
 
     def showSpellInDetail_(self, spell):
-        title, meta, body = format_spell_for_overlay(spell)
+        title, meta, body = format_spell_for_detail(spell)
         self.setSpellDetailHeaderHidden_(False)
         self.spell_detail_title_label.setStringValue_(title)
         italian_name = spell.italian_name.strip()
@@ -5861,12 +5887,12 @@ class MainWindowController(NSObject):
         panel.setHidesOnDeactivate_(True)
         panel.setOpaque_(False)
         panel.setHasShadow_(True)
-        panel.setBackgroundColor_(ui_color(0.075, 0.075, 0.080, 0.98))
+        panel.setBackgroundColor_(theme_color("panel_alt", 0.98))
 
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        style_layer(content, ui_color(0.075, 0.075, 0.080, 1.0), ui_color(0.22, 0.22, 0.24, 1.0), 12, 1)
+        style_layer(content, theme_color("panel_alt"), theme_color("border_soft"), 12, 1)
         amount_label = make_label("Amount", (18, 104, 80, 20), 12, True)
-        amount_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
+        amount_label.setTextColor_(theme_color("muted"))
         self.hp_adjust_amount_field = NSTextField.alloc().initWithFrame_(NSMakeRect(18, 72, 56, 28))
         self.hp_adjust_amount_field.setStringValue_("1")
         style_number_input(self.hp_adjust_amount_field)
@@ -5877,7 +5903,7 @@ class MainWindowController(NSObject):
         damage_button.setTag_(-1)
 
         temp_label = make_label("Temp", (18, 44, 80, 20), 12, True)
-        temp_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
+        temp_label.setTextColor_(theme_color("muted"))
         self.hp_adjust_temp_field = NSTextField.alloc().initWithFrame_(NSMakeRect(18, 12, 56, 28))
         self.hp_adjust_temp_field.setStringValue_("0")
         style_number_input(self.hp_adjust_temp_field)
@@ -6124,482 +6150,25 @@ class MainWindowController(NSObject):
         NSApp.terminate_(None)
 
 
-class OverlayController(NSObject):
-    panel: NSPanel
-    title_label: NSTextField
-    italian_name_label: NSTextField
-    meta_label: NSTextField
-    progress_bar: NSProgressIndicator
-    progress_label: NSTextField
-    progress_body_label: NSTextField
-    dice_result_label: NSTextField
-    scroll_view: NSScrollView
-    scroll_content: FlippedView
-    body_label: DiceTextView
-    components_label: NSTextField
-    component_material_label: NSTextField
-    range_label: NSTextField
-    duration_label: NSTextField
-    classes_label: NSTextField
-    v_box: CheckboxSquareView
-    s_box: CheckboxSquareView
-    m_box: CheckboxSquareView
-    detail_views: list[Any]
-    tracking_area: Any
-    timer: NSTimer | None
-    hide_after: float
-    mouse_inside: bool
-    keep_visible: bool
-
-    def initWithHideAfter_(self, hide_after: float):
-        self = objc.super(OverlayController, self).init()
-        if self is None:
-            return None
-
-        self.hide_after = hide_after
-        self.timer = None
-        self.mouse_inside = False
-        self.keep_visible = True
-
-        screen = NSScreen.mainScreen().visibleFrame()
-        width = 640
-        height = 520
-        x = screen.origin.x + screen.size.width - width - 28
-        y = screen.origin.y + screen.size.height - height - 28
-
-        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow
-        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, width, height),
-            style,
-            NSBackingStoreBuffered,
-            False,
-        )
-        self.panel.setTitle_("Arcane Manager")
-        self.panel.setFloatingPanel_(True)
-        self.panel.setHidesOnDeactivate_(False)
-        self.panel.setBecomesKeyOnlyIfNeeded_(True)
-        self.panel.setLevel_(24)
-        self.panel.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehaviorFullScreenAuxiliary
-        )
-        self.panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.94))
-        self.panel.setDelegate_(self)
-
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        self.tracking_area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
-            NSMakeRect(0, 0, width, height),
-            NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
-            self,
-            None,
-        )
-        content.addTrackingArea_(self.tracking_area)
-
-        self.title_label = make_label("Listening...", (24, 460, 592, 36), 24, True)
-        self.italian_name_label = make_label("", (24, 438, 592, 20), 12)
-        self.italian_name_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.78, 0.78, 0.82, 1.0))
-        self.meta_label = make_multiline(make_label("Say the name of a configured spell.", (24, 392, 592, 42), 13))
-        self.meta_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0))
-
-        self.progress_bar = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(24, 330, 592, 16))
-        self.progress_bar.setIndeterminate_(False)
-        self.progress_bar.setMinValue_(0.0)
-        self.progress_bar.setMaxValue_(100.0)
-        self.progress_bar.setDoubleValue_(0.0)
-        self.progress_bar.setHidden_(True)
-        self.progress_label = make_label("", (24, 302, 592, 20), 11)
-        self.progress_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.78, 0.78, 0.82, 1.0))
-        self.progress_label.setHidden_(True)
-        self.progress_body_label = make_multiline(make_label("", (24, 256, 592, 40), 13))
-        self.progress_body_label.setHidden_(True)
-
-        self.dice_result_label = make_label("", (24, 364, 592, 20), 12, True)
-        self.dice_result_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0))
-        self.dice_result_label.setHidden_(True)
-
-        self.scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(24, 24, 592, 332))
-        self.scroll_view.setHasVerticalScroller_(True)
-        self.scroll_view.setAutohidesScrollers_(False)
-        self.scroll_view.setDrawsBackground_(False)
-        self.scroll_view.setBorderType_(0)
-        self.scroll_content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 592, 332))
-        self.scroll_view.setDocumentView_(self.scroll_content)
-
-        self.body_label = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 278))
-        self.body_label.setFont_(NSFont.systemFontOfSize_(14))
-        self.body_label.setTextColor_(NSColor.whiteColor())
-        self.body_label.setRollTarget_(self)
-
-        self.components_label = make_label("Components:", (0, 0, 100, 24), 14)
-        self.v_label = make_label("V", (112, 0, 18, 24), 14)
-        self.v_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(134, 4, 16, 16))
-        self.s_label = make_label("S", (166, 0, 18, 24), 14)
-        self.s_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(188, 4, 16, 16))
-        self.m_label = make_label("M", (220, 0, 22, 24), 14)
-        self.m_box = CheckboxSquareView.alloc().initWithFrame_(NSMakeRect(246, 4, 16, 16))
-        self.component_material_label = make_multiline(make_label("", (276, 0, 284, 24), 14))
-        self.range_label = make_multiline(make_label("", (0, 0, 560, 24), 14))
-        self.duration_label = make_multiline(make_label("", (0, 0, 560, 24), 14))
-        self.classes_label = make_multiline(make_label("", (0, 0, 560, 24), 14))
-        self.detail_views = [
-            self.components_label,
-            self.v_box,
-            self.v_label,
-            self.s_box,
-            self.s_label,
-            self.m_box,
-            self.m_label,
-            self.component_material_label,
-            self.range_label,
-            self.duration_label,
-            self.classes_label,
-        ]
-        self._set_detail_controls_hidden(True)
-
-        content.addSubview_(self.title_label)
-        content.addSubview_(self.italian_name_label)
-        content.addSubview_(self.meta_label)
-        content.addSubview_(self.progress_bar)
-        content.addSubview_(self.progress_label)
-        content.addSubview_(self.progress_body_label)
-        content.addSubview_(self.dice_result_label)
-        content.addSubview_(self.scroll_view)
-        self.scroll_content.addSubview_(self.body_label)
-        for view in self.detail_views:
-            self.scroll_content.addSubview_(view)
-        self.panel.setContentView_(content)
-        self.panel.orderOut_(None)
-        return self
-
-    def _cancel_hide_timer(self):
-        if self.timer is not None:
-            self.timer.invalidate()
-            self.timer = None
-
-    def _schedule_hide_timer(self):
-        self._cancel_hide_timer()
-        if self.hide_after > 0 and not self.mouse_inside:
-            self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                self.hide_after,
-                self,
-                "hide:",
-                None,
-                False,
-            )
-
-    def mouseEntered_(self, _event):
-        self.mouse_inside = True
-        self._cancel_hide_timer()
-
-    def mouseExited_(self, _event):
-        self.mouse_inside = False
-        self._cancel_hide_timer()
-        if not self.keep_visible:
-            self.hide_(None)
-
-    def _set_detail_controls_hidden(self, hidden: bool):
-        for view in self.detail_views:
-            view.setHidden_(hidden)
-
-    def _layout_spell_details(self, attributed_body):
-        body_width = 560
-        scroll_height = 332
-        gap = 14
-        rect = attributed_body.boundingRectWithSize_options_(
-            NSMakeSize(body_width, 10000),
-            NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading,
-        )
-        body_height = max(64, int(rect.size.height) + 10)
-        components_y = body_height + gap
-        range_y = components_y + 30
-        duration_y = range_y + 28
-        classes_y = duration_y + 28
-        document_height = max(scroll_height, classes_y + 34)
-
-        self.scroll_content.setFrame_(NSMakeRect(0, 0, 592, document_height))
-        self.body_label.setFrame_(NSMakeRect(0, 0, body_width, body_height))
-        self.components_label.setFrame_(NSMakeRect(0, components_y, 100, 24))
-        self.v_label.setFrame_(NSMakeRect(112, components_y, 18, 24))
-        self.v_box.setFrame_(NSMakeRect(134, components_y + 4, 16, 16))
-        self.s_label.setFrame_(NSMakeRect(166, components_y, 18, 24))
-        self.s_box.setFrame_(NSMakeRect(188, components_y + 4, 16, 16))
-        self.m_label.setFrame_(NSMakeRect(220, components_y, 22, 24))
-        self.m_box.setFrame_(NSMakeRect(246, components_y + 4, 16, 16))
-        self.component_material_label.setFrame_(NSMakeRect(276, components_y, 284, 24))
-        self.range_label.setFrame_(NSMakeRect(0, range_y, body_width, 24))
-        self.duration_label.setFrame_(NSMakeRect(0, duration_y, body_width, 24))
-        self.classes_label.setFrame_(NSMakeRect(0, classes_y, body_width, 24))
-        self.scroll_view.contentView().scrollToPoint_(NSMakePoint(0, 0))
-        self.scroll_view.reflectScrolledClipView_(self.scroll_view.contentView())
-
-    def showMessage_meta_body_(self, title: str, meta: str, body: str):
-        self.keep_visible = True
-        self._cancel_hide_timer()
-        self.title_label.setStringValue_(title)
-        self.italian_name_label.setStringValue_("")
-        self.dice_result_label.setStringValue_("")
-        self.dice_result_label.setHidden_(True)
-        self.progress_bar.setHidden_(True)
-        self.progress_label.setHidden_(True)
-        self.progress_body_label.setHidden_(True)
-        self.meta_label.setStringValue_(meta)
-        self.scroll_view.setHidden_(False)
-        self.body_label.setString_(body)
-        self.body_label.setDiceRanges_([])
-        self.scroll_content.setFrame_(NSMakeRect(0, 0, 592, 332))
-        self.body_label.setFrame_(NSMakeRect(0, 0, 560, 332))
-        self._set_detail_controls_hidden(True)
-        self.panel.orderFrontRegardless()
-
-    def showStatus_(self, payload: dict[str, str]):
-        self.showMessage_meta_body_(
-            payload.get("title", ""),
-            payload.get("meta", ""),
-            payload.get("body", ""),
-        )
-
-    def showProgress_(self, payload: dict[str, Any]):
-        self.keep_visible = True
-        self._cancel_hide_timer()
-        percent = float(payload.get("percent", 0.0))
-        self.title_label.setStringValue_(str(payload.get("title", "")))
-        self.italian_name_label.setStringValue_("")
-        self.meta_label.setStringValue_(str(payload.get("meta", "")))
-        self.dice_result_label.setStringValue_("")
-        self.dice_result_label.setHidden_(True)
-        self.progress_bar.setHidden_(False)
-        self.progress_bar.setDoubleValue_(max(0.0, min(100.0, percent)))
-        self.progress_label.setHidden_(False)
-        self.progress_label.setStringValue_(str(payload.get("detail", "")))
-        self.progress_body_label.setHidden_(False)
-        self.progress_body_label.setStringValue_(str(payload.get("body", "")))
-        self.scroll_view.setHidden_(True)
-        self.body_label.setString_("")
-        self.body_label.setDiceRanges_([])
-        self.scroll_content.setFrame_(NSMakeRect(0, 0, 592, 280))
-        self.body_label.setFrame_(NSMakeRect(0, 0, 560, 280))
-        self._set_detail_controls_hidden(True)
-        self.panel.orderFrontRegardless()
-
-    def showSpell_(self, spell: Spell):
-        self.keep_visible = False
-        title, meta, body = format_spell_for_overlay(spell)
-        flags = component_flags(spell.components)
-        attributed_body = attributed_spell_body(body)
-        dice_ranges = dice_ranges_for_body(body)
-
-        self.title_label.setStringValue_(title)
-        self.dice_result_label.setStringValue_("")
-        self.dice_result_label.setHidden_(True)
-        self.progress_bar.setHidden_(True)
-        self.progress_label.setHidden_(True)
-        self.progress_body_label.setHidden_(True)
-        self.scroll_view.setHidden_(False)
-        italian_name = spell.italian_name.strip()
-        if italian_name and normalize(italian_name) != normalize(spell.name):
-            self.italian_name_label.setStringValue_(f"({italian_name})")
-        else:
-            self.italian_name_label.setStringValue_("")
-        self.meta_label.setStringValue_(meta)
-        self.body_label.textStorage().setAttributedString_(attributed_body)
-        self.body_label.setDiceRanges_(dice_ranges)
-        self._layout_spell_details(attributed_body)
-        self.v_box.setChecked_(flags["V"])
-        self.s_box.setChecked_(flags["S"])
-        self.m_box.setChecked_(flags["M"])
-        self.component_material_label.setStringValue_(component_material(spell.components))
-        self.range_label.setStringValue_(f"Range: {spell.range}" if spell.range.strip() else "")
-        self.duration_label.setStringValue_(f"Duration: {spell.duration}" if spell.duration.strip() else "")
-        classes = ", ".join(spell.spell_lists)
-        self.classes_label.setStringValue_(f"Classes: {classes}" if classes else "")
-        self._set_detail_controls_hidden(False)
-        self.panel.orderFrontRegardless()
-        self._schedule_hide_timer()
-
-    def rollDice_(self, expression: str):
-        expression = str(expression).strip()
-        if not (DICE_PATTERN.fullmatch(expression) or DICE_FORMULA_PATTERN.fullmatch(expression)):
-            self.displayDiceRollResult_(f"Invalid dice expression: {expression}")
-            return
-        self.displayDiceRollResult_(f"Rolling {expression}...")
-        if show_3d_dice_roll(expression, self):
-            return
-        try:
-            result = roll_dice_formula(expression)
-            if DICE_PATTERN.fullmatch(expression):
-                show_dice_roll_animation(roll_dice(expression))
-        except ValueError as exc:
-            result = str(exc)
-        self.displayDiceRollResult_(result)
-
-    def displayDiceRollResult_(self, result):
-        record_dice_roll_history(result)
-        self.dice_result_label.setStringValue_(result)
-        self.dice_result_label.setHidden_(False)
-        self.panel.orderFrontRegardless()
-
-    def hide_(self, _timer):
-        self.timer = None
-        if self.keep_visible:
-            return
-        if self.mouse_inside:
-            return
-        self.panel.orderOut_(None)
-
-    def windowWillClose_(self, _notification):
-        NSApp.terminate_(None)
-
-
-class SpellSearchController(NSObject):
-    panel: NSPanel
-    search_field: NSTextField
-    hint_label: NSTextField
-    result_buttons: list[NSButton]
-    displayed_spells: list[Spell]
-    spells: list[Spell]
-    overlay: OverlayController
-
-    def initWithSpells_overlay_(self, spells, overlay):
-        self = objc.super(SpellSearchController, self).init()
-        if self is None:
-            return None
-
-        self.spells = list(spells)
-        self.overlay = overlay
-        self.displayed_spells = []
-        self.result_buttons = []
-
-        screen = NSScreen.mainScreen().visibleFrame()
-        width = 520
-        height = 370
-        x = screen.origin.x + (screen.size.width - width) / 2
-        y = screen.origin.y + (screen.size.height - height) / 2
-
-        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow
-        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, width, height),
-            style,
-            NSBackingStoreBuffered,
-            False,
-        )
-        self.panel.setTitle_("Search Spell")
-        self.panel.setFloatingPanel_(True)
-        self.panel.setHidesOnDeactivate_(False)
-        self.panel.setLevel_(24)
-        self.panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.97))
-
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        title_label = make_label("Search spell", (24, 316, 472, 30), 20, True)
-        self.search_field = NSTextField.alloc().initWithFrame_(NSMakeRect(24, 276, 472, 30))
-        self.search_field.setFont_(NSFont.systemFontOfSize_(15))
-        self.search_field.setTarget_(self)
-        self.search_field.setAction_("submitSearch:")
-        self.search_field.setDelegate_(self)
-
-        self.hint_label = make_label("Type an English or Italian spell name, then press Enter.", (24, 246, 472, 20), 11)
-        self.hint_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.78, 0.78, 0.82, 1.0))
-
-        content.addSubview_(title_label)
-        content.addSubview_(self.search_field)
-        content.addSubview_(self.hint_label)
-
-        for index in range(8):
-            button = NSButton.alloc().initWithFrame_(NSMakeRect(24, 212 - index * 27, 472, 24))
-            button.setBordered_(False)
-            button.setAlignment_(0)
-            button.setFont_(NSFont.systemFontOfSize_(13))
-            button.setTarget_(self)
-            button.setAction_("selectResult:")
-            button.setTag_(index)
-            button.setHidden_(True)
-            self.result_buttons.append(button)
-            content.addSubview_(button)
-
-        self.panel.setContentView_(content)
-        self.updateResultsForQuery_("")
-        return self
-
-    def show_(self, _sender):
-        self.search_field.setStringValue_("")
-        self.updateResultsForQuery_("")
-        NSApp.activateIgnoringOtherApps_(True)
-        self.panel.makeKeyAndOrderFront_(None)
-        self.panel.makeFirstResponder_(self.search_field)
-
-    def showWithQuery_(self, payload: dict[str, str]):
-        query = str(payload.get("query", ""))
-        heard = str(payload.get("heard", query))
-        self.search_field.setStringValue_(query)
-        self.updateResultsForQuery_(query)
-        if self.displayed_spells:
-            self.hint_label.setStringValue_(f'I heard "{heard}". Choose the intended spell.')
-        else:
-            self.hint_label.setStringValue_(f'I heard "{heard}", but found no likely spell.')
-        NSApp.activateIgnoringOtherApps_(True)
-        self.panel.makeKeyAndOrderFront_(None)
-        self.panel.makeFirstResponder_(self.search_field)
-
-    def controlTextDidChange_(self, notification):
-        field = notification.object()
-        self.updateResultsForQuery_(str(field.stringValue()))
-
-    def updateResultsForQuery_(self, query: str):
-        self.displayed_spells = search_spells(query, self.spells, len(self.result_buttons))
-        for index, button in enumerate(self.result_buttons):
-            if index >= len(self.displayed_spells):
-                button.setHidden_(True)
-                continue
-
-            spell = self.displayed_spells[index]
-            secondary = spell.italian_name.strip()
-            title = spell.name
-            if secondary and normalize(secondary) != normalize(spell.name):
-                title = f"{spell.name} ({secondary})"
-            button.setTitle_(title)
-            button.setHidden_(False)
-
-        if self.displayed_spells:
-            self.hint_label.setStringValue_("Press Enter to open the first result, or click a spell below.")
-        else:
-            self.hint_label.setStringValue_("No matching spells found.")
-
-    def submitSearch_(self, _sender):
-        if self.displayed_spells:
-            self.openSpell_(self.displayed_spells[0])
-
-    def selectResult_(self, sender):
-        index = int(sender.tag())
-        if 0 <= index < len(self.displayed_spells):
-            self.openSpell_(self.displayed_spells[index])
-
-    def openSpell_(self, spell: Spell):
-        self.panel.orderOut_(None)
-        self.overlay.showSpell_(spell)
-
-
-class PreferencesController(NSObject):
+class SettingsController(NSObject):
     panel: NSPanel
     app_delegate: Any
-    shortcut_label: NSTextField
-    hint_label: NSTextField
-    record_button: NSButton
-    reset_button: NSButton
-    recording: bool
+    color_well_keys: dict[int, tuple[str, str]]
+    color_wells: list[Any]
 
     def initWithAppDelegate_(self, app_delegate):
-        self = objc.super(PreferencesController, self).init()
+        self = objc.super(SettingsController, self).init()
         if self is None:
             return None
-
         self.app_delegate = app_delegate
-        self.recording = False
+        self.color_well_keys = {}
+        self.color_wells = []
 
+        width = 520
+        height = 620
         screen = NSScreen.mainScreen().visibleFrame()
-        width = 420
-        height = 268
         x = screen.origin.x + (screen.size.width - width) / 2
         y = screen.origin.y + (screen.size.height - height) / 2
-
         style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, width, height),
@@ -6607,135 +6176,110 @@ class PreferencesController(NSObject):
             NSBackingStoreBuffered,
             False,
         )
-        self.panel.setTitle_("Arcane Manager Preferences")
+        self.panel.setTitle_("Arcane Manager Settings")
         self.panel.setFloatingPanel_(True)
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setLevel_(24)
-        self.panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.97))
+        self.panel.setBackgroundColor_(theme_color("panel_alt", 0.98))
 
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        title_label = make_label("Preferences", (24, 212, 372, 28), 18, True)
-        search_label = make_label("Search hotkey", (24, 172, 120, 24), 13, True)
-        self.shortcut_label = make_label("", (154, 172, 242, 24), 13)
-        self.shortcut_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0))
+        content_height = 58 + (len(THEME_COLOR_LABELS) + len(DICE_THEME_COLOR_LABELS)) * 34 + 96
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(False)
+        scroll.setDrawsBackground_(False)
+        scroll.setBorderType_(0)
+        content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, width, content_height))
+        scroll.setDocumentView_(content)
 
-        self.hint_label = make_multiline(make_label("", (24, 102, 372, 44), 11))
-        self.hint_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.78, 0.78, 0.82, 1.0))
+        y_cursor = 24
+        title = make_label("Theme Colors", (24, y_cursor, 260, 28), 20, True)
+        content.addSubview_(title)
+        reset_button = NSButton.alloc().initWithFrame_(NSMakeRect(width - 150, y_cursor, 126, 30))
+        reset_button.setTitle_("Reset Theme")
+        reset_button.setTarget_(self)
+        reset_button.setAction_("resetTheme:")
+        style_layer(reset_button, theme_color("surface"), theme_color("border_soft"), 8, 1)
+        content.addSubview_(reset_button)
+        y_cursor += 46
 
-        self.record_button = NSButton.alloc().initWithFrame_(NSMakeRect(24, 28, 170, 30))
-        self.record_button.setTitle_("Record Shortcut")
-        self.record_button.setTarget_(self)
-        self.record_button.setAction_("beginRecording:")
+        y_cursor = self._addSection_title_rows_originY_content_("App Theme", THEME_COLOR_LABELS, y_cursor, content)
+        y_cursor += 18
+        self._addSection_title_rows_originY_content_("Dice Overlay", DICE_THEME_COLOR_LABELS, y_cursor, content)
 
-        self.reset_button = NSButton.alloc().initWithFrame_(NSMakeRect(206, 28, 110, 30))
-        self.reset_button.setTitle_("Reset")
-        self.reset_button.setTarget_(self)
-        self.reset_button.setAction_("resetShortcut:")
-
-        close_button = NSButton.alloc().initWithFrame_(NSMakeRect(326, 28, 70, 30))
-        close_button.setTitle_("Close")
-        close_button.setTarget_(self)
-        close_button.setAction_("close:")
-
-        for view in (
-            title_label,
-            search_label,
-            self.shortcut_label,
-            self.hint_label,
-            self.record_button,
-            self.reset_button,
-            close_button,
-        ):
-            content.addSubview_(view)
-
-        self.panel.setContentView_(content)
-        self.updateDisplay()
+        self.panel.setContentView_(scroll)
         return self
 
+    @objc.python_method
+    def _addSection_title_rows_originY_content_(self, title_text, rows, y_cursor, content):
+        section_label = make_label(str(title_text), (24, y_cursor, 240, 24), 15, True)
+        section_label.setTextColor_(theme_color("gold"))
+        content.addSubview_(section_label)
+        y_cursor += 32
+        section = "app" if str(title_text) == "App Theme" else "dice"
+        for key, label_text in rows:
+            label = make_label(str(label_text), (40, y_cursor + 5, 260, 20), 13, True)
+            label.setTextColor_(theme_color("text"))
+            well = NSColorWell.alloc().initWithFrame_(NSMakeRect(330, y_cursor, 44, 24))
+            well.setTarget_(self)
+            well.setAction_("themeColorChanged:")
+            tag = len(self.color_wells) + 1
+            well.setTag_(tag)
+            self.color_well_keys[tag] = (section, key)
+            self.color_wells.append(well)
+            content.addSubview_(label)
+            content.addSubview_(well)
+            y_cursor += 34
+        return y_cursor
+
+    @objc.python_method
+    def syncColorWells(self):
+        for well in self.color_wells:
+            section, key = self.color_well_keys.get(int(well.tag()), ("", ""))
+            if section == "app" and key in THEME_RGB:
+                well.setColor_(theme_color(key))
+            elif section == "dice" and key in DICE_THEME_RGB:
+                red, green, blue = DICE_THEME_RGB[key]
+                well.setColor_(ui_color(red, green, blue, 1.0))
+
     def show_(self, _sender):
-        self.recording = False
-        self.updateDisplay()
+        self.panel.setBackgroundColor_(theme_color("panel_alt", 0.98))
+        self.syncColorWells()
         NSApp.activateIgnoringOtherApps_(True)
         self.panel.makeKeyAndOrderFront_(None)
 
-    def beginRecording_(self, _sender):
-        self.recording = True
-        self.record_button.setTitle_("Recording...")
-        self.hint_label.setStringValue_("Press the new shortcut. Use Cmd, Option, or Ctrl plus a key.")
+    def themeColorChanged_(self, sender):
+        section, key = self.color_well_keys.get(int(sender.tag()), ("", ""))
+        rgb = hex_to_rgb(color_to_hex(sender.color()))
+        if rgb is None:
+            return
+        if section == "app" and key in THEME_RGB:
+            THEME_RGB[key] = rgb
+        elif section == "dice" and key in DICE_THEME_RGB:
+            DICE_THEME_RGB[key] = rgb
+        else:
+            return
+        save_theme_overrides()
+        self.app_delegate.applyThemeFromSettings()
 
-    def resetShortcut_(self, _sender):
-        self.recording = False
-        self.app_delegate.setSearchHotkey_(default_search_hotkey())
-        self.updateDisplay()
-
-    def close_(self, _sender):
-        self.recording = False
-        self.panel.orderOut_(None)
-
-    def updateDisplay(self):
-        hotkey = self.app_delegate.search_hotkey
-        self.shortcut_label.setStringValue_(hotkey_display(hotkey))
-        self.record_button.setTitle_("Record Shortcut")
-        self.hint_label.setStringValue_("Default shortcut: Cmd+Shift+Space.")
-
-    def captureHotkeyEvent_(self, event) -> bool:
-        if not self.recording or not self.panel.isVisible():
-            return False
-
-        key = normalized_hotkey_key(event.charactersIgnoringModifiers() or "")
-        if key == "\x1b":
-            self.recording = False
-            self.updateDisplay()
-            return True
-
-        modifiers = int(event.modifierFlags()) & SUPPORTED_HOTKEY_MODIFIERS
-        hotkey = Hotkey(modifiers, key, int(event.keyCode()))
-        if not valid_hotkey(hotkey):
-            self.hint_label.setStringValue_("Shortcut not saved. Use Cmd, Option, or Ctrl plus a key.")
-            return True
-
-        self.recording = False
-        self.app_delegate.setSearchHotkey_(hotkey)
-        self.updateDisplay()
-        return True
-
-
-def carbon_hotkey_event_callback(_next_handler, _event, _user_data):
-    delegate = GLOBAL_HOTKEY_DELEGATE
-    if delegate is not None:
-        delegate.performSelectorOnMainThread_withObject_waitUntilDone_("showSearch:", None, False)
-    return 0
-
-
-CARBON_HOTKEY_CALLBACK = CARBON_EVENT_HANDLER_TYPE(carbon_hotkey_event_callback)
+    def resetTheme_(self, _sender):
+        reset_theme_overrides()
+        self.syncColorWells()
+        self.app_delegate.applyThemeFromSettings()
 
 
 class AppDelegate(NSObject):
-    overlay: OverlayController
     spells: list[Spell]
     creatures: list[Creature]
     spell_lookup: dict[str, Spell]
     status_item: Any
     main_controller: MainWindowController
-    search_menu_item: NSMenuItem
-    status_search_item: NSMenuItem
-    search_controller: SpellSearchController
-    preferences_controller: PreferencesController
-    search_hotkey: Hotkey
-    carbon: Any
-    carbon_hotkey_ref: Any
-    carbon_event_handler_ref: Any
-    local_hotkey_monitor: Any
-    local_hotkey_handler: Any
-    simulate_command: str | None
+    settings_controller: SettingsController
 
-    def initWithSpells_creatures_spellLookup_overlay_simulate_(
+    def initWithSpells_creatures_spellLookup_(
         self,
         spells,
         creatures,
         spell_lookup,
-        overlay,
-        simulate_command,
     ):
         self = objc.super(AppDelegate, self).init()
         if self is None:
@@ -6743,49 +6287,22 @@ class AppDelegate(NSObject):
         self.spells = list(spells)
         self.creatures = list(creatures)
         self.spell_lookup = spell_lookup
-        self.overlay = overlay
-        self.simulate_command = simulate_command
         self.status_item = None
         self.main_controller = None
-        self.search_menu_item = None
-        self.status_search_item = None
-        self.search_controller = None
-        self.preferences_controller = None
-        self.search_hotkey = load_search_hotkey()
-        self.carbon = None
-        self.carbon_hotkey_ref = None
-        self.carbon_event_handler_ref = None
-        self.local_hotkey_monitor = None
-        self.local_hotkey_handler = None
+        self.settings_controller = None
         return self
 
     def applicationDidFinishLaunching_(self, _notification):
-        global GLOBAL_HOTKEY_DELEGATE
-        GLOBAL_HOTKEY_DELEGATE = self
-        self.main_controller = MainWindowController.alloc().initWithBestiary_spells_spellLookup_overlay_(
+        load_theme_overrides()
+        self.main_controller = MainWindowController.alloc().initWithBestiary_spells_spellLookup_(
             self.creatures,
             self.spells,
             self.spell_lookup,
-            self.overlay,
         )
-        self.search_controller = SpellSearchController.alloc().initWithSpells_overlay_(self.spells, self.overlay)
-        self.preferences_controller = PreferencesController.alloc().initWithAppDelegate_(self)
-        APP_RETAINED_OBJECTS.extend([self.main_controller, self.search_controller, self.preferences_controller])
+        APP_RETAINED_OBJECTS.append(self.main_controller)
         self.installMainMenu()
         self.installStatusMenu()
-        self.installHotkeyMonitor()
         self.main_controller.show_(None)
-
-        if self.simulate_command:
-            self.handleCommand_(self.simulate_command)
-            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                3.0,
-                self,
-                "quit:",
-                None,
-                False,
-            )
-            return
 
     def installMainMenu(self):
         main_menu = NSMenu.alloc().init()
@@ -6802,6 +6319,15 @@ class AppDelegate(NSObject):
         app_menu.addItem_(about_item)
         app_menu.addItem_(NSMenuItem.separatorItem())
 
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Settings...",
+            "showSettings:",
+            ",",
+        )
+        settings_item.setTarget_(self)
+        app_menu.addItem_(settings_item)
+        app_menu.addItem_(NSMenuItem.separatorItem())
+
         main_window_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Show Main Window",
             "showMainWindow:",
@@ -6809,26 +6335,6 @@ class AppDelegate(NSObject):
         )
         main_window_item.setTarget_(self)
         app_menu.addItem_(main_window_item)
-        app_menu.addItem_(NSMenuItem.separatorItem())
-
-        search_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Search Spell...",
-            "showSearch:",
-            self.search_hotkey.key,
-        )
-        search_item.setTarget_(self)
-        search_item.setKeyEquivalentModifierMask_(self.search_hotkey.modifiers)
-        self.search_menu_item = search_item
-        app_menu.addItem_(search_item)
-        app_menu.addItem_(NSMenuItem.separatorItem())
-
-        preferences_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Preferences...",
-            "showPreferences:",
-            ",",
-        )
-        preferences_item.setTarget_(self)
-        app_menu.addItem_(preferences_item)
         app_menu.addItem_(NSMenuItem.separatorItem())
 
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quit Arcane Manager", "quit:", "q")
@@ -6874,6 +6380,15 @@ class AppDelegate(NSObject):
         menu.addItem_(about_item)
         menu.addItem_(NSMenuItem.separatorItem())
 
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Settings...",
+            "showSettings:",
+            "",
+        )
+        settings_item.setTarget_(self)
+        menu.addItem_(settings_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+
         main_window_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Show Main Window",
             "showMainWindow:",
@@ -6883,120 +6398,28 @@ class AppDelegate(NSObject):
         menu.addItem_(main_window_item)
         menu.addItem_(NSMenuItem.separatorItem())
 
-        search_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Search Spell... ({hotkey_display(self.search_hotkey)})",
-            "showSearch:",
-            "",
-        )
-        search_item.setTarget_(self)
-        self.status_search_item = search_item
-        menu.addItem_(search_item)
-        menu.addItem_(NSMenuItem.separatorItem())
-
-        preferences_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Preferences...",
-            "showPreferences:",
-            "",
-        )
-        preferences_item.setTarget_(self)
-        menu.addItem_(preferences_item)
-        menu.addItem_(NSMenuItem.separatorItem())
-
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quit Arcane Manager", "quit:", "q")
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
         self.status_item.setMenu_(menu)
 
-    def installHotkeyMonitor(self):
-        self.local_hotkey_handler = lambda event: None if self.handleHotkeyEvent_(event) else event
-        self.local_hotkey_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
-            NSEventMaskKeyDown,
-            self.local_hotkey_handler,
-        )
-        APP_RETAINED_OBJECTS.extend([self.local_hotkey_handler, self.local_hotkey_monitor])
-        self.installCarbonHotkey()
-
-    def installCarbonHotkey(self):
-        try:
-            self.carbon = load_carbon_framework()
-            event_type = CarbonEventTypeSpec(CARBON_EVENT_CLASS_KEYBOARD, CARBON_EVENT_HOTKEY_PRESSED)
-            handler_ref = ctypes.c_void_p()
-            status = self.carbon.InstallEventHandler(
-                self.carbon.GetApplicationEventTarget(),
-                CARBON_HOTKEY_CALLBACK,
-                1,
-                ctypes.byref(event_type),
-                None,
-                ctypes.byref(handler_ref),
-            )
-            if status != 0:
-                log(f"Global hotkey handler installation failed with status {status}.")
-                return
-            self.carbon_event_handler_ref = handler_ref
-            APP_RETAINED_OBJECTS.extend([self.carbon, self.carbon_event_handler_ref, CARBON_HOTKEY_CALLBACK])
-            self.registerCarbonHotkey()
-        except Exception as exc:
-            log(f"Global hotkey setup failed: {exc}")
-
-    def registerCarbonHotkey(self):
-        if self.carbon is None:
-            return
-        self.unregisterCarbonHotkey()
-        hotkey_ref = ctypes.c_void_p()
-        status = self.carbon.RegisterEventHotKey(
-            ctypes.c_uint32(self.search_hotkey.key_code),
-            ctypes.c_uint32(carbon_modifier_flags(self.search_hotkey.modifiers)),
-            CarbonEventHotKeyID(CARBON_HOTKEY_SIGNATURE, 1),
-            self.carbon.GetApplicationEventTarget(),
-            0,
-            ctypes.byref(hotkey_ref),
-        )
-        if status != 0:
-            log(f"Global search hotkey registration failed for {hotkey_display(self.search_hotkey)} with status {status}.")
-            return
-        self.carbon_hotkey_ref = hotkey_ref
-        APP_RETAINED_OBJECTS.append(self.carbon_hotkey_ref)
-        log(f"Global search hotkey enabled: {hotkey_display(self.search_hotkey)}.")
-
-    def unregisterCarbonHotkey(self):
-        if self.carbon is None or self.carbon_hotkey_ref is None:
-            return
-        try:
-            self.carbon.UnregisterEventHotKey(self.carbon_hotkey_ref)
-        except Exception as exc:
-            log(f"Global hotkey unregister error: {exc}")
-        self.carbon_hotkey_ref = None
-
-    def handleHotkeyEvent_(self, event) -> bool:
-        if self.preferences_controller is not None and self.preferences_controller.captureHotkeyEvent_(event):
-            return True
-
-        modifiers = int(event.modifierFlags()) & SUPPORTED_HOTKEY_MODIFIERS
-        key = str(event.charactersIgnoringModifiers() or "").lower()
-        if modifiers == self.search_hotkey.modifiers and int(event.keyCode()) == self.search_hotkey.key_code:
-            self.showSearch_(None)
-            return True
-        return False
-
     def showMainWindow_(self, _sender):
         self.main_controller.show_(None)
 
-    def showSearch_(self, _sender):
-        self.search_controller.show_(None)
+    def showSettings_(self, _sender):
+        if self.settings_controller is None:
+            self.settings_controller = SettingsController.alloc().initWithAppDelegate_(self)
+            APP_RETAINED_OBJECTS.append(self.settings_controller)
+        self.settings_controller.show_(None)
 
-    def showPreferences_(self, _sender):
-        self.preferences_controller.show_(None)
-
-    def setSearchHotkey_(self, hotkey: Hotkey):
-        self.search_hotkey = hotkey
-        save_search_hotkey(hotkey)
-        self.registerCarbonHotkey()
-        if self.search_menu_item is not None:
-            self.search_menu_item.setKeyEquivalent_(hotkey.key)
-            self.search_menu_item.setKeyEquivalentModifierMask_(hotkey.modifiers)
-        if self.status_search_item is not None:
-            self.status_search_item.setTitle_(f"Search Spell... ({hotkey_display(hotkey)})")
-        log(f"Search hotkey set to {hotkey_display(hotkey)}.")
+    @objc.python_method
+    def applyThemeFromSettings(self):
+        if self.main_controller is not None:
+            self.main_controller.applyTheme()
+        if self.settings_controller is not None:
+            self.settings_controller.panel.setBackgroundColor_(theme_color("panel_alt", 0.98))
+        if THREE_D_DICE_ROLLER is not None:
+            THREE_D_DICE_ROLLER.applyTheme()
 
     def showAbout_(self, _sender):
         alert = NSAlert.alloc().init()
@@ -7010,21 +6433,12 @@ class AppDelegate(NSObject):
         NSApp.activateIgnoringOtherApps_(True)
         alert.runModal()
 
-    def handleCommand_(self, command: str):
-        spell = find_spell_in_text(command, self.spell_lookup)
-        if spell is not None:
-            self.overlay.showSpell_(spell)
-
-    def applicationWillTerminate_(self, _notification):
-        self.unregisterCarbonHotkey()
-
     def applicationShouldTerminateAfterLastWindowClosed_(self, _sender):
         return False
 
     def quit_(self, _sender):
         if self.main_controller is not None and not self.main_controller.confirmAdventureCanDiscardOrSave():
             return
-        self.unregisterCarbonHotkey()
         NSApp.terminate_(None)
 
 
@@ -7040,16 +6454,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=str(DEFAULT_BESTIARY_FILE),
         help="Path to a JSON SRD bestiary database.",
     )
-    parser.add_argument(
-        "--hide-after",
-        type=float,
-        default=5.0,
-        help="Seconds before hiding the overlay. Use 0 to keep it open.",
-    )
-    parser.add_argument(
-        "--simulate",
-        help="Show a spell by alias, then exit.",
-    )
     return parser.parse_args(argv)
 
 
@@ -7063,15 +6467,12 @@ def main(argv: list[str] | None = None) -> int:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
-    overlay = OverlayController.alloc().initWithHideAfter_(args.hide_after)
-    delegate = AppDelegate.alloc().initWithSpells_creatures_spellLookup_overlay_simulate_(
+    delegate = AppDelegate.alloc().initWithSpells_creatures_spellLookup_(
         spells,
         creatures,
         lookup,
-        overlay,
-        args.simulate,
     )
-    APP_RETAINED_OBJECTS.extend([overlay, delegate])
+    APP_RETAINED_OBJECTS.append(delegate)
     log(f"Starting app with {len(spells)} spells and {len(creatures)} creatures.")
     app.setDelegate_(delegate)
     app.run()

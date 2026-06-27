@@ -7,11 +7,12 @@
   <style>
     :root {
       color-scheme: dark;
-      --red: #b90f0b;
-      --green: #12d29a;
-      --text: #f6f4ef;
-      --muted: #bbb9b5;
-      --panel: rgba(11, 11, 13, 0.76);
+      --red: #e15763;
+      --green: #6dd674;
+      --text: #e0e2e6;
+      --muted: #8f96a3;
+      --panel: rgba(31, 35, 43, 0.88);
+      --border: rgba(86, 96, 112, 0.32);
     }
 
     html,
@@ -28,7 +29,7 @@
     #stage {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.08);
+      background: rgba(26, 30, 36, 0.10);
       cursor: default;
     }
 
@@ -46,10 +47,10 @@
       max-width: calc(100vw - 4rem);
       transform: translateX(-50%) translateY(0.35rem);
       padding: 0.9rem 1.15rem;
-      border: 1px solid rgba(255, 255, 255, 0.16);
+      border: 1px solid var(--border);
       border-radius: 1.15rem;
       background: var(--panel);
-      box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.42);
+      box-shadow: 0 1.5rem 4rem rgba(13, 16, 22, 0.44);
       color: var(--text);
       text-align: center;
       opacity: 0;
@@ -102,7 +103,7 @@
       justify-content: center;
       padding: 2rem;
       color: var(--text);
-      background: rgba(0, 0, 0, 0.5);
+      background: rgba(26, 30, 36, 0.74);
       font-size: 2rem;
       font-weight: 800;
       text-align: center;
@@ -140,8 +141,8 @@
     const totalEl = document.getElementById("total");
     const fallbackEl = document.getElementById("fallback");
 
-    const RED = "#b90f0b";
-    const WHITE = "#fff8ef";
+    let diceRed = "#e15763";
+    let diceText = "#f0f1f4";
     const FRAME_RATE = 1 / 60;
     const MATERIAL_OPTIONS = {
       specular: 0x5a1712,
@@ -163,6 +164,27 @@
     let lastPhysicsTime = 0;
     let cleanupTimer = 0;
     let resultDismissible = false;
+
+    function hexToRgba(hex, alpha) {
+      const match = String(hex || "").match(/^#?([0-9a-f]{6})$/i);
+      if (!match) return `rgba(31, 35, 43, ${alpha})`;
+      const value = match[1];
+      const red = parseInt(value.slice(0, 2), 16);
+      const green = parseInt(value.slice(2, 4), 16);
+      const blue = parseInt(value.slice(4, 6), 16);
+      return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+    }
+
+    window.arcaneApplyTheme = function applyTheme(theme) {
+      const root = document.documentElement.style;
+      if (theme?.overlayPanel) root.setProperty("--panel", hexToRgba(theme.overlayPanel, 0.88));
+      if (theme?.overlayBorder) root.setProperty("--border", hexToRgba(theme.overlayBorder, 0.32));
+      if (theme?.overlayStage) stage.style.background = hexToRgba(theme.overlayStage, 0.10);
+      if (theme?.overlayFallback) fallbackEl.style.background = hexToRgba(theme.overlayFallback, 0.74);
+      if (theme?.diceGreen) root.setProperty("--green", theme.diceGreen);
+      if (theme?.diceRed) diceRed = theme.diceRed;
+      if (theme?.diceText) diceText = theme.diceText;
+    };
 
     function post(payload) {
       try {
@@ -442,13 +464,13 @@
       canvas.height = textureSize;
       const ctx = canvas.getContext("2d", { alpha: true });
       ctx.clearRect(0, 0, textureSize, textureSize);
-      ctx.fillStyle = RED;
+      ctx.fillStyle = diceRed;
       ctx.fillRect(0, 0, textureSize, textureSize);
 
       const glow = ctx.createRadialGradient(textureSize * 0.32, textureSize * 0.25, 0, textureSize * 0.45, textureSize * 0.42, textureSize * 0.75);
       glow.addColorStop(0, "rgba(255, 255, 255, 0.18)");
       glow.addColorStop(0.55, "rgba(255, 255, 255, 0.04)");
-      glow.addColorStop(1, "rgba(0, 0, 0, 0.24)");
+      glow.addColorStop(1, "rgba(26, 30, 36, 0.30)");
       ctx.fillStyle = glow;
       ctx.fillRect(0, 0, textureSize, textureSize);
 
@@ -468,10 +490,10 @@
         ctx.rotate((60 * Math.PI) / 180);
         ctx.translate(-textureSize / 2, -textureSize / 2);
       }
-      ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+      ctx.shadowColor = "rgba(13, 16, 22, 0.46)";
       ctx.shadowBlur = textureSize * 0.025;
       ctx.shadowOffsetY = textureSize * 0.015;
-      ctx.fillStyle = WHITE;
+      ctx.fillStyle = diceText;
       ctx.fillText(String(label), textureSize / 2, textureSize / 2 + textureSize * 0.02);
       if (label === 6 || label === 9) {
         ctx.font = `850 ${fontSize * 0.45}px -apple-system, BlinkMacSystemFont, sans-serif`;
