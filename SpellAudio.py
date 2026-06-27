@@ -45,6 +45,7 @@ try:
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
+        NSGraphicsContext,
         NSImage,
         NSImageView,
         NSStringDrawingUsesFontLeading,
@@ -65,6 +66,7 @@ try:
         NSTrackingMouseEnteredAndExited,
         NSTrackingMouseMoved,
         NSTextView,
+        NSTextFieldCell,
         NSVariableStatusItemLength,
         NSView,
         NSWindow,
@@ -671,13 +673,77 @@ def component_material(components: str) -> str:
 
 DICE_PATTERN = re.compile(r"\b(\d+)d(\d+)(?:\s*([+-])\s*(\d+))?\b", flags=re.I)
 DICE_FORMULA_PATTERN = re.compile(r"^\s*\d+d\d+(?:\s*\+\s*\d+d\d+)*(?:\s*[+-]\s*\d+)?\s*$", flags=re.I)
+COMPONENT_BADGE_PATTERN = re.compile(r"\[(?:V|S|M)\]")
+ATTACK_BONUS_PATTERN = re.compile(
+    r"\b(?:Melee|Ranged|Melee or Ranged)\s+(?:Weapon|Spell)\s+Attack:\s*([+-]\s*\d+)\s+to hit",
+    flags=re.I,
+)
+CHECK_BONUS_LINE_PATTERN = re.compile(r"^(Saving Throws|Skills):[^\n]*", flags=re.M)
+SIGNED_BONUS_PATTERN = re.compile(r"([+-]\s*\d+)")
 
 
 def dice_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
     return [(match.start(), match.end() - match.start(), match.group(0)) for match in DICE_PATTERN.finditer(body)]
 
 
-def spell_ranges_for_body(body: str, spells: list[Spell]) -> list[tuple[int, int, Spell]]:
+def d20_expression_for_bonus(bonus: int) -> str:
+    return f"1d20+{bonus}" if bonus >= 0 else f"1d20{bonus}"
+
+
+def attack_roll_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
+    ranges: list[tuple[int, int, str]] = []
+    for match in ATTACK_BONUS_PATTERN.finditer(body):
+        bonus_text = re.sub(r"\s+", "", match.group(1))
+        try:
+            bonus = int(bonus_text)
+        except ValueError:
+            continue
+        start, end = match.start(1), match.end(1)
+        ranges.append((start, end - start, d20_expression_for_bonus(bonus)))
+    return ranges
+
+
+def check_bonus_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
+    ranges: list[tuple[int, int, str]] = []
+    for line_match in CHECK_BONUS_LINE_PATTERN.finditer(body):
+        line = line_match.group(0)
+        for bonus_match in SIGNED_BONUS_PATTERN.finditer(line):
+            bonus_text = re.sub(r"\s+", "", bonus_match.group(1))
+            try:
+                bonus = int(bonus_text)
+            except ValueError:
+                continue
+            start = line_match.start() + bonus_match.start(1)
+            end = line_match.start() + bonus_match.end(1)
+            ranges.append((start, end - start, d20_expression_for_bonus(bonus)))
+    return ranges
+
+
+def monster_roll_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
+    return sorted(
+        dice_ranges_for_body(body) + attack_roll_ranges_for_body(body) + check_bonus_ranges_for_body(body),
+        key=lambda item: item[0],
+    )
+
+
+def spell_section_ranges(body: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    section_start = None
+    section_heading = re.compile(r"^[A-Za-z][A-Za-z ]+:$", flags=re.M)
+    for match in section_heading.finditer(body):
+        heading = match.group(0).rstrip(":").lower()
+        if heading == "spells":
+            section_start = match.end()
+            continue
+        if section_start is not None:
+            ranges.append((section_start, match.start()))
+            section_start = None
+    if section_start is not None:
+        ranges.append((section_start, len(body)))
+    return ranges
+
+
+def spell_ranges_for_body(body: str, spells: list[Spell], allowed_sections: list[tuple[int, int]] | None = None) -> list[tuple[int, int, Spell]]:
     candidates: list[tuple[int, str, Spell]] = []
     seen: set[tuple[str, str]] = set()
     for spell in spells:
@@ -690,14 +756,20 @@ def spell_ranges_for_body(body: str, spells: list[Spell]) -> list[tuple[int, int
             if key in seen:
                 continue
             seen.add(key)
-            candidates.append((len(cleaned), cleaned, spell))
+            candidates.append((len(normalized), normalized, spell))
 
     ranges: list[tuple[int, int, Spell]] = []
     occupied: list[tuple[int, int]] = []
     for _length, candidate, spell in sorted(candidates, key=lambda item: item[0], reverse=True):
-        pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(candidate)}(?![A-Za-z0-9])", flags=re.I)
+        words = candidate.split()
+        if not words:
+            continue
+        pattern_text = r"[^A-Za-z0-9]+".join(re.escape(word) for word in words)
+        pattern = re.compile(rf"(?<![A-Za-z0-9]){pattern_text}(?![A-Za-z0-9])", flags=re.I)
         for match in pattern.finditer(body):
             start, end = match.start(), match.end()
+            if allowed_sections is not None and not any(section_start <= start and end <= section_end for section_start, section_end in allowed_sections):
+                continue
             if any(start < used_end and end > used_start for used_start, used_end in occupied):
                 continue
             occupied.append((start, end))
@@ -789,6 +861,38 @@ def roll_dice_expression(expression: str) -> str:
     return format_dice_roll(roll_dice(expression))
 
 
+DICE_ROLL_HISTORY_LIMIT = 12
+DICE_ROLL_HISTORY: list[str] = []
+DICE_HISTORY_LISTENERS: list[Any] = []
+
+
+def record_dice_roll_history(result: Any):
+    text = str(result).strip()
+    if not text.startswith("Rolled "):
+        return
+    DICE_ROLL_HISTORY.insert(0, text)
+    del DICE_ROLL_HISTORY[DICE_ROLL_HISTORY_LIMIT:]
+    for listener in list(DICE_HISTORY_LISTENERS):
+        try:
+            listener.refreshDiceHistory()
+        except Exception:
+            pass
+
+
+def format_dice_roll_history() -> str:
+    if not DICE_ROLL_HISTORY:
+        return "No rolls yet."
+    return "\n".join(f"{index + 1}. {entry}" for index, entry in enumerate(DICE_ROLL_HISTORY))
+
+
+def component_badge_text(components: str) -> str:
+    flags = component_flags(components)
+    badges = [f"[{key}]" if flags[key] else f"{key}-" for key in ("V", "S", "M")]
+    material = component_material(components)
+    suffix = f"  {material}" if material else ""
+    return " ".join(badges) + suffix
+
+
 def add_colored_ranges(attributed, ranges: list[tuple[int, int, Any]], color):
     for start, length, _payload in ranges:
         attributed.addAttribute_value_range_(NSForegroundColorAttributeName, color, NSMakeRange(start, length))
@@ -796,6 +900,7 @@ def add_colored_ranges(attributed, ranges: list[tuple[int, int, Any]], color):
 
 def attributed_spell_body(body: str):
     dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
+    component_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0)
     attributes = {
         NSFontAttributeName: NSFont.systemFontOfSize_(14),
         NSForegroundColorAttributeName: NSColor.whiteColor(),
@@ -816,10 +921,21 @@ def attributed_spell_body(body: str):
             dice_color,
             NSMakeRange(match.start(), match.end() - match.start()),
         )
+    for match in COMPONENT_BADGE_PATTERN.finditer(body):
+        attributed.addAttribute_value_range_(
+            NSForegroundColorAttributeName,
+            component_color,
+            NSMakeRange(match.start(), match.end() - match.start()),
+        )
+        attributed.addAttribute_value_range_(
+            NSFontAttributeName,
+            NSFont.boldSystemFontOfSize_(14),
+            NSMakeRange(match.start(), match.end() - match.start()),
+        )
     return attributed
 
 
-def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]]):
+def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]], roll_ranges: list[tuple[int, int, str]] | None = None):
     dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
     spell_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0)
     attributes = {
@@ -836,11 +952,11 @@ def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]
                     NSFont.boldSystemFontOfSize_(14),
                     NSMakeRange(start, len(line)),
                 )
-    for match in DICE_PATTERN.finditer(body):
+    for start, length, _expression in (roll_ranges if roll_ranges is not None else dice_ranges_for_body(body)):
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
             dice_color,
-            NSMakeRange(match.start(), match.end() - match.start()),
+            NSMakeRange(start, length),
         )
     add_colored_ranges(attributed, spell_ranges, spell_color)
     return attributed
@@ -903,6 +1019,53 @@ class CheckboxSquareView(NSView):
 class FlippedView(NSView):
     def isFlipped(self):
         return True
+
+
+class ContextInputPanel(NSPanel):
+    def canBecomeKeyWindow(self):
+        return True
+
+    def canBecomeMainWindow(self):
+        return False
+
+
+class CenteredTextFieldCell(NSTextFieldCell):
+    def _centeredRectForBounds_(self, rect):
+        draw_rect = objc.super(CenteredTextFieldCell, self).drawingRectForBounds_(rect)
+        text_size = self.cellSizeForBounds_(rect)
+        if draw_rect.size.height > text_size.height:
+            draw_rect.origin.y += (draw_rect.size.height - text_size.height) / 2
+            draw_rect.size.height = text_size.height
+        return draw_rect
+
+    def drawingRectForBounds_(self, rect):
+        return self._centeredRectForBounds_(rect)
+
+    def editWithFrame_inView_editor_delegate_event_(self, rect, control_view, text_obj, delegate, event):
+        objc.super(CenteredTextFieldCell, self).editWithFrame_inView_editor_delegate_event_(
+            self._centeredRectForBounds_(rect),
+            control_view,
+            text_obj,
+            delegate,
+            event,
+        )
+
+    def selectWithFrame_inView_editor_delegate_start_length_(self, rect, control_view, text_obj, delegate, start, length):
+        objc.super(CenteredTextFieldCell, self).selectWithFrame_inView_editor_delegate_start_length_(
+            self._centeredRectForBounds_(rect),
+            control_view,
+            text_obj,
+            delegate,
+            start,
+            length,
+        )
+
+
+class PaddedCenteredTextFieldCell(CenteredTextFieldCell):
+    def _centeredRectForBounds_(self, rect):
+        inset = 10
+        padded = NSMakeRect(rect.origin.x + inset, rect.origin.y, max(1, rect.size.width - inset * 2), rect.size.height)
+        return objc.super(PaddedCenteredTextFieldCell, self)._centeredRectForBounds_(padded)
 
 
 class DiceTextView(NSTextView):
@@ -1599,12 +1762,148 @@ def style_layer(view, background=None, border=None, radius: float = 10.0, border
         layer.setBorderWidth_(border_width)
 
 
+def style_text_input(field):
+    placeholder = field.placeholderString()
+    cell = PaddedCenteredTextFieldCell.alloc().initTextCell_(str(field.stringValue()))
+    if placeholder is not None:
+        cell.setPlaceholderString_(placeholder)
+    cell.setScrollable_(True)
+    cell.setFont_(NSFont.systemFontOfSize_(14))
+    cell.setEditable_(True)
+    cell.setSelectable_(True)
+    field.setBezeled_(True)
+    field.setBordered_(False)
+    field.setDrawsBackground_(True)
+    field.setCell_(cell)
+    field.setEditable_(True)
+    field.setSelectable_(True)
+    field.setBackgroundColor_(ui_color(0.075, 0.075, 0.080, 1.0))
+    field.setFocusRingType_(1)
+    field.setTextColor_(ui_color(0.88, 0.88, 0.90, 1.0))
+    field.setFont_(NSFont.systemFontOfSize_(14))
+    field.setUsesSingleLineMode_(True)
+    field.cell().setScrollable_(True)
+    style_layer(field, ui_color(0.075, 0.075, 0.080, 1.0), ui_color(0.25, 0.25, 0.28, 1.0), 8, 1)
+
+
+def style_number_input(field):
+    cell = CenteredTextFieldCell.alloc().initTextCell_(str(field.stringValue()))
+    cell.setAlignment_(1)
+    cell.setScrollable_(True)
+    cell.setFont_(NSFont.systemFontOfSize_(15))
+    field.setCell_(cell)
+    field.setBezeled_(False)
+    field.setBordered_(False)
+    field.setDrawsBackground_(True)
+    field.setEditable_(True)
+    field.setSelectable_(True)
+    field.setAlignment_(1)
+    field.setBackgroundColor_(ui_color(0.105, 0.105, 0.112, 1.0))
+    field.setFocusRingType_(1)
+    field.setTextColor_(ui_color(0.90, 0.90, 0.92, 1.0))
+    field.setFont_(NSFont.systemFontOfSize_(15))
+    field.setUsesSingleLineMode_(True)
+    field.cell().setScrollable_(True)
+    style_layer(field, ui_color(0.105, 0.105, 0.112, 1.0), ui_color(0.30, 0.30, 0.33, 1.0), 8, 1)
+
+
 def draw_text(text: str, x: float, y: float, size: float = 13, color=None, bold: bool = False):
     attributes = {
         NSFontAttributeName: NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size),
         NSForegroundColorAttributeName: color or NSColor.whiteColor(),
     }
     NSString.stringWithString_(str(text)).drawAtPoint_withAttributes_(NSMakePoint(x, y), attributes)
+
+
+def text_attributes(size: float = 13, color=None, bold: bool = False):
+    return {
+        NSFontAttributeName: NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size),
+        NSForegroundColorAttributeName: color or NSColor.whiteColor(),
+    }
+
+
+def text_width(text: str, attributes) -> float:
+    return NSString.stringWithString_(str(text)).sizeWithAttributes_(attributes).width
+
+
+def fit_text_to_width(text: str, width: float, attributes) -> str:
+    text = str(text)
+    if width <= 0:
+        return ""
+    if text_width(text, attributes) <= width:
+        return text
+    suffix = "..."
+    if text_width(suffix, attributes) > width:
+        return ""
+    low = 0
+    high = len(text)
+    best = suffix
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = text[:mid].rstrip() + suffix
+        if text_width(candidate, attributes) <= width:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def draw_fitted_text(text: str, rect, size: float = 13, color=None, bold: bool = False):
+    attributes = text_attributes(size, color, bold)
+    fitted = fit_text_to_width(text, rect.size.width, attributes)
+    NSString.stringWithString_(fitted).drawInRect_withAttributes_(rect, attributes)
+
+
+def draw_right_fitted_text(text: str, rect, size: float = 13, color=None, bold: bool = False):
+    attributes = text_attributes(size, color, bold)
+    fitted = fit_text_to_width(text, rect.size.width, attributes)
+    fitted_width = min(rect.size.width, text_width(fitted, attributes))
+    draw_rect = NSMakeRect(rect.origin.x + rect.size.width - fitted_width, rect.origin.y, fitted_width, rect.size.height)
+    NSString.stringWithString_(fitted).drawInRect_withAttributes_(draw_rect, attributes)
+
+
+def draw_right_fitted_text_centered(text: str, rect, size: float = 13, color=None, bold: bool = False):
+    attributes = text_attributes(size, color, bold)
+    fitted = fit_text_to_width(text, rect.size.width, attributes)
+    string = NSString.stringWithString_(fitted)
+    text_size = string.sizeWithAttributes_(attributes)
+    fitted_width = min(rect.size.width, text_size.width)
+    draw_rect = NSMakeRect(
+        rect.origin.x + rect.size.width - fitted_width,
+        rect.origin.y + (rect.size.height - text_size.height) / 2,
+        fitted_width,
+        text_size.height,
+    )
+    string.drawInRect_withAttributes_(draw_rect, attributes)
+
+
+def draw_centered_text_in_rect(text: str, rect, size: float = 13, color=None, bold: bool = False):
+    attributes = text_attributes(size, color, bold)
+    string = NSString.stringWithString_(str(text))
+    text_size = string.sizeWithAttributes_(attributes)
+    draw_rect = NSMakeRect(
+        rect.origin.x + (rect.size.width - text_size.width) / 2,
+        rect.origin.y + (rect.size.height - text_size.height) / 2,
+        text_size.width,
+        text_size.height,
+    )
+    string.drawInRect_withAttributes_(draw_rect, attributes)
+
+
+def draw_center_fitted_text(text: str, rect, size: float = 13, color=None, bold: bool = False):
+    attributes = text_attributes(size, color, bold)
+    fitted = fit_text_to_width(text, rect.size.width, attributes)
+    fitted_width = min(rect.size.width, text_width(fitted, attributes))
+    draw_rect = NSMakeRect(rect.origin.x + (rect.size.width - fitted_width) / 2, rect.origin.y, fitted_width, rect.size.height)
+    NSString.stringWithString_(fitted).drawInRect_withAttributes_(draw_rect, attributes)
+
+
+def point_in_rect(point, rect) -> bool:
+    return (
+        rect.origin.x <= point.x <= rect.origin.x + rect.size.width
+        and rect.origin.y <= point.y <= rect.origin.y + rect.size.height
+    )
 
 
 def icon_image(name: str):
@@ -1646,6 +1945,23 @@ def draw_rounded_rect(rect, fill, stroke=None, radius: float = 8, stroke_width: 
         path.stroke()
 
 
+def draw_segmented_rounded_bar(rect, segments: list[tuple[float, Any]], background, radius: float = 4):
+    path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, radius, radius)
+    NSGraphicsContext.saveGraphicsState()
+    path.addClip()
+    background.set()
+    NSBezierPath.bezierPathWithRect_(rect).fill()
+    cursor_x = rect.origin.x
+    for width, color in segments:
+        segment_w = max(0, min(width, rect.origin.x + rect.size.width - cursor_x))
+        if segment_w <= 0:
+            continue
+        color.set()
+        NSBezierPath.bezierPathWithRect_(NSMakeRect(cursor_x, rect.origin.y, segment_w, rect.size.height)).fill()
+        cursor_x += segment_w
+    NSGraphicsContext.restoreGraphicsState()
+
+
 def ellipsize(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -1654,11 +1970,269 @@ def ellipsize(text: str, max_chars: int) -> str:
     return text[: max_chars - 3].rstrip() + "..."
 
 
+class SearchResultButton(NSButton):
+    row_kind = objc.ivar()
+    primary_text = objc.ivar()
+    secondary_text = objc.ivar()
+    hp_text = objc.ivar()
+    ac_text = objc.ivar()
+    cr_text = objc.ivar()
+    meta_text = objc.ivar()
+
+    def initWithFrame_(self, frame):
+        self = objc.super(SearchResultButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.row_kind = ""
+        self.primary_text = ""
+        self.secondary_text = ""
+        self.hp_text = ""
+        self.ac_text = ""
+        self.cr_text = ""
+        self.meta_text = ""
+        self.setBordered_(False)
+        self.setTitle_("")
+        return self
+
+    def configureMonsterResult_(self, creature: Creature):
+        self.row_kind = "monster"
+        self.primary_text = creature.name
+        self.secondary_text = ""
+        self.hp_text = f"HP {creature.hp}"
+        self.ac_text = f"AC {display_ac(creature.ac)}"
+        self.cr_text = f"CR {creature.cr}"
+        self.meta_text = ""
+        self.setToolTip_(creature_summary(creature))
+        self.setNeedsDisplay_(True)
+
+    def configureSpellResult_(self, spell: Spell):
+        self.row_kind = "spell"
+        self.primary_text = spell.name
+        self.secondary_text = spell.italian_name if normalize(spell.italian_name) != normalize(spell.name) else ""
+        self.hp_text = ""
+        self.ac_text = ""
+        self.cr_text = ""
+        self.meta_text = " | ".join(part for part in (spell.level, spell.school) if part)
+        tooltip_parts = [spell.name]
+        if self.secondary_text:
+            tooltip_parts.append(f"({self.secondary_text})")
+        if self.meta_text:
+            tooltip_parts.append(f"- {self.meta_text}")
+        self.setToolTip_(" ".join(tooltip_parts))
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds()
+        highlighted = self.isHighlighted()
+        fill = ui_color(0.155, 0.155, 0.168, 1.0) if highlighted else ui_color(0.105, 0.105, 0.115, 1.0)
+        stroke = ui_color(0.33, 0.33, 0.36, 1.0) if highlighted else ui_color(0.22, 0.22, 0.24, 1.0)
+        draw_rounded_rect(
+            NSMakeRect(0.5, 0.5, max(1, bounds.size.width - 1), max(1, bounds.size.height - 1)),
+            fill,
+            stroke,
+            7,
+            1,
+        )
+        if self.row_kind == "monster":
+            self._drawMonsterResult_(bounds)
+        elif self.row_kind == "spell":
+            self._drawSpellResult_(bounds)
+
+    def mouseDown_(self, event):
+        if self.row_kind == "monster":
+            return
+        objc.super(SearchResultButton, self).mouseDown_(event)
+
+    def _drawMonsterResult_(self, bounds):
+        width = bounds.size.width
+        primary = ui_color(0.94, 0.94, 0.95, 1.0)
+        muted = ui_color(0.66, 0.66, 0.68, 1.0)
+        name_attrs = text_attributes(14, primary, True)
+        meta_attrs = text_attributes(12.5, muted, True)
+        hp_text = self.hp_text.replace("HP ", "HP: ")
+        ac_text = self.ac_text.replace("AC ", "AC: ")
+        ac_width = text_width(ac_text, meta_attrs)
+        hp_width = text_width(hp_text, meta_attrs)
+        gap = 8
+        x = 14
+        y = max(0, (bounds.size.height - 19) / 2 - 1)
+        metadata_width = hp_width + ac_width + gap * 2
+        name_width = max(54, width - x * 2 - metadata_width)
+        fitted_name = fit_text_to_width(self.primary_text, name_width, name_attrs)
+        NSString.stringWithString_(fitted_name).drawInRect_withAttributes_(NSMakeRect(x, y, name_width, 20), name_attrs)
+        meta_x = x + min(name_width, text_width(fitted_name, name_attrs)) + gap
+        NSString.stringWithString_(hp_text).drawInRect_withAttributes_(NSMakeRect(meta_x, y + 1, hp_width, 19), meta_attrs)
+        NSString.stringWithString_(ac_text).drawInRect_withAttributes_(NSMakeRect(meta_x + hp_width + gap, y + 1, ac_width, 19), meta_attrs)
+
+    def _drawSpellResult_(self, bounds):
+        width = bounds.size.width
+        primary = ui_color(0.86, 0.86, 0.88, 1.0)
+        muted = ui_color(0.66, 0.66, 0.69, 1.0)
+        gold = ui_color(1.0, 0.82, 0.26, 1.0)
+        draw_fitted_text(self.primary_text, NSMakeRect(14, 7, width - 28, 17), 13.5, primary, True)
+        if width >= 340 and self.meta_text:
+            meta_w = min(172, max(120, width * 0.40))
+            secondary_w = width - meta_w - 38
+            draw_fitted_text(self.secondary_text, NSMakeRect(14, 25, secondary_w, 15), 11.5, muted, False)
+            draw_right_fitted_text(self.meta_text, NSMakeRect(width - meta_w - 14, 25, meta_w, 15), 11.5, gold, True)
+            return
+        bottom = self.meta_text
+        if self.secondary_text and self.meta_text:
+            bottom = f"{self.secondary_text} - {self.meta_text}"
+        elif self.secondary_text:
+            bottom = self.secondary_text
+        draw_fitted_text(bottom, NSMakeRect(14, 25, width - 28, 15), 11.5, muted, False)
+
+
+class StatBlockAbilityButton(NSButton):
+    ability_name = objc.ivar()
+    score_text = objc.ivar()
+    bonus_text = objc.ivar()
+    roll_expression = objc.ivar()
+    roll_target = objc.ivar()
+
+    def initWithFrame_(self, frame):
+        self = objc.super(StatBlockAbilityButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.ability_name = ""
+        self.score_text = ""
+        self.bonus_text = ""
+        self.roll_expression = ""
+        self.roll_target = None
+        self.setBordered_(False)
+        self.setTitle_("")
+        return self
+
+    def configure_stat(self, name, score, bonus, target):
+        bonus_value = int(bonus)
+        self.ability_name = str(name)
+        self.score_text = str(score)
+        self.bonus_text = f"{bonus_value:+d}"
+        self.roll_expression = f"1d20+{bonus_value}" if bonus_value >= 0 else f"1d20{bonus_value}"
+        self.roll_target = target
+        self.setToolTip_(f"Roll {self.ability_name} {self.roll_expression}")
+        self.setNeedsDisplay_(True)
+
+    def _bonusRect(self):
+        bounds = self.bounds()
+        inset = 2
+        return NSMakeRect(inset, bounds.size.height * 0.27, bounds.size.width - inset * 2, bounds.size.height * 0.71)
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds()
+        highlighted = self.isHighlighted()
+        fill = ui_color(0.070, 0.070, 0.078, 1.0)
+        stroke = ui_color(0.50, 0.50, 0.54, 1.0) if highlighted else ui_color(0.36, 0.36, 0.39, 1.0)
+        circle_fill = ui_color(0.090, 0.090, 0.100, 1.0)
+        text = ui_color(0.94, 0.94, 0.95, 1.0)
+        muted = ui_color(0.68, 0.68, 0.71, 1.0)
+        green = ui_color(0.58, 0.95, 0.28, 1.0)
+
+        rect = self._bonusRect()
+        draw_rounded_rect(rect, fill, stroke, 7, 1.25)
+        circle_side = min(bounds.size.width - 4, bounds.size.height * 0.43)
+        circle = NSMakeRect(
+            (bounds.size.width - circle_side) / 2,
+            1,
+            circle_side,
+            circle_side,
+        )
+        oval = NSBezierPath.bezierPathWithOvalInRect_(circle)
+        circle_fill.set()
+        oval.fill()
+
+        stroke.set()
+        oval.setLineWidth_(1.25)
+        oval.stroke()
+
+        draw_center_fitted_text(self.ability_name, NSMakeRect(5, bounds.size.height - 20, bounds.size.width - 10, 14), 9.5, muted, True)
+        draw_center_fitted_text(self.bonus_text, NSMakeRect(5, bounds.size.height * 0.46, bounds.size.width - 10, 22), 16, green, True)
+        draw_center_fitted_text(self.score_text, NSMakeRect(5, circle.origin.y + (circle.size.height - 19) / 2, bounds.size.width - 10, 20), 14, text, True)
+
+    def mouseDown_(self, event):
+        point = self.convertPoint_fromView_(event.locationInWindow(), None)
+        if self.roll_expression and self.roll_target is not None and point_in_rect(point, self._bonusRect()):
+            self.roll_target.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "rollDice:",
+                self.roll_expression,
+                False,
+            )
+            return
+        objc.super(StatBlockAbilityButton, self).mouseDown_(event)
+
+
+class RowAddButton(NSButton):
+    def initWithFrame_(self, frame):
+        self = objc.super(RowAddButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.setBordered_(False)
+        self.setTitle_("")
+        return self
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds()
+        highlighted = self.isHighlighted()
+        icon_color = ui_color(0.96, 0.96, 0.97, 1.0) if highlighted else ui_color(0.78, 0.78, 0.80, 1.0)
+        if highlighted:
+            side = min(30, bounds.size.width, bounds.size.height)
+            draw_rounded_rect(
+                NSMakeRect((bounds.size.width - side) / 2, (bounds.size.height - side) / 2, side, side),
+                ui_color(0.14, 0.14, 0.15, 1.0),
+                ui_color(0.30, 0.30, 0.32, 1.0),
+                side / 2,
+                1,
+            )
+        attributes = text_attributes(16, icon_color, True)
+        glyph = NSString.stringWithString_("+")
+        glyph_size = glyph.sizeWithAttributes_(attributes)
+        glyph.drawAtPoint_withAttributes_(
+            NSMakePoint(
+                (bounds.size.width - glyph_size.width) / 2,
+                (bounds.size.height - glyph_size.height) / 2 - 1,
+            ),
+            attributes,
+        )
+
+
+class StyledPopUpButton(NSPopUpButton):
+    def initWithFrame_(self, frame):
+        self = objc.super(StyledPopUpButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.setBordered_(False)
+        return self
+
+    def drawRect_(self, _rect):
+        bounds = self.bounds()
+        highlighted = self.isHighlighted()
+        fill = ui_color(0.115, 0.115, 0.122, 1.0) if highlighted else ui_color(0.095, 0.095, 0.102, 1.0)
+        stroke = ui_color(0.34, 0.34, 0.36, 1.0) if highlighted else ui_color(0.24, 0.24, 0.26, 1.0)
+        draw_rounded_rect(
+            NSMakeRect(0.5, 0.5, max(1, bounds.size.width - 1), max(1, bounds.size.height - 1)),
+            fill,
+            stroke,
+            7,
+            1,
+        )
+        item = self.selectedItem()
+        title = str(item.title()) if item is not None else str(self.title())
+        draw_fitted_text(title, NSMakeRect(12, 8, max(20, bounds.size.width - 42), 18), 13, ui_color(0.88, 0.88, 0.90, 1.0), True)
+        draw_right_fitted_text("⌄", NSMakeRect(bounds.size.width - 28, 7, 16, 18), 14, ui_color(0.66, 0.66, 0.69, 1.0), True)
+
+
+MONSTER_RESULT_ROW_HEIGHT = 42
+MONSTER_RESULT_ROW_STEP = 50
+SPELL_RESULT_ROW_HEIGHT = 42
+SPELL_RESULT_ROW_STEP = 50
+
+
 class CombatTrackerView(NSView):
     combatants: list[dict[str, Any]]
     current_turn_index: int
     name_rects: list[tuple[Any, int]]
-    hp_button_rects: list[tuple[Any, int, int]]
+    hp_button_rects: list[tuple[Any, int]]
     target: Any
     tracking_area: Any
 
@@ -1716,12 +2290,12 @@ class CombatTrackerView(NSView):
 
     def _hit_test(self, event) -> tuple[str, int, int | None] | None:
         point = self.convertPoint_fromView_(event.locationInWindow(), None)
-        for rect, index, delta in self.hp_button_rects:
+        for rect, index in self.hp_button_rects:
             if (
                 rect.origin.x <= point.x <= rect.origin.x + rect.size.width
                 and rect.origin.y <= point.y <= rect.origin.y + rect.size.height
             ):
-                return ("hp", index, delta)
+                return ("hp", index, None)
         for rect, index in self.name_rects:
             if (
                 rect.origin.x <= point.x <= rect.origin.x + rect.size.width
@@ -1752,14 +2326,21 @@ class CombatTrackerView(NSView):
                 )
             return
         if hit is not None and hit[0] == "hp":
-            _kind, index, delta = hit
+            _kind, index, _delta = hit
             if self.target is not None:
+                point = event.locationInWindow()
                 self.target.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "adjustCombatantHp:",
-                    {"index": index, "delta": delta},
+                    "openCombatantHpMenu:",
+                    {"index": index, "x": float(point.x), "y": float(point.y)},
                     False,
                 )
             return
+        if self.target is not None:
+            self.target.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "closeCombatantHpMenu:",
+                None,
+                False,
+            )
         objc.super(CombatTrackerView, self).mouseDown_(event)
 
     def drawRect_(self, _rect):
@@ -1772,6 +2353,7 @@ class CombatTrackerView(NSView):
         card_border = ui_color(0.17, 0.17, 0.18, 1.0)
         current_border = ui_color(0.55, 0.55, 0.57, 1.0)
         green = ui_color(0.10, 0.78, 0.52, 1.0)
+        temp_blue = ui_color(0.20, 0.58, 0.95, 1.0)
         pink = ui_color(1.0, 0.18, 0.39, 1.0)
         red = ui_color(0.55, 0.12, 0.18, 1.0)
         white = NSColor.whiteColor()
@@ -1782,15 +2364,18 @@ class CombatTrackerView(NSView):
         compact = width < 820
         badge_w = 0 if compact else 78
         badge_x = right - badge_w - 18
-        ac_x = right - badge_w - 72
-        hp_text_x = ac_x - 106
+        ac_w = 44
+        ac_x = right - badge_w - 90
         name_x = left + 132
         max_display_name = "Adult Green Dragon"
         max_name_chars = len(max_display_name)
         name_w = max_name_chars * 8 + 8
-        hp_action_x = name_x + name_w + 10
-        bar_x = hp_action_x + 92
-        bar_right = hp_text_x - 18
+        hp_text_x = name_x + name_w + 16
+        hp_text_w = 76
+        hp_action_w = 44
+        hp_action_x = ac_x - hp_action_w - 18
+        bar_x = hp_text_x + hp_text_w + 14
+        bar_right = hp_action_x - 18
         bar_w = max(110, bar_right - bar_x)
 
         if not self.combatants:
@@ -1805,8 +2390,8 @@ class CombatTrackerView(NSView):
         draw_text("Init", left + 30, 22, 11, muted, True)
         draw_text("Type", left + 86, 22, 11, muted, True)
         draw_text("Name", name_x, 22, 11, muted, True)
-        draw_text("HP", hp_action_x, 22, 11, muted, True)
-        draw_text("AC", ac_x, 22, 11, muted, True)
+        draw_right_fitted_text_centered("HP", NSMakeRect(hp_text_x, 18, hp_text_w, 20), 11, muted, True)
+        draw_centered_text_in_rect("AC", NSMakeRect(ac_x, 18, ac_w, 20), 11, muted, True)
         if not compact:
             draw_text("Status", badge_x + 10, 22, 11, muted, True)
 
@@ -1849,33 +2434,51 @@ class CombatTrackerView(NSView):
             bar_y = row_y + 24
             bar_h = 8
             if is_monster:
-                minus_rect = NSMakeRect(hp_action_x - 6, row_y + 14, 28, 28)
-                plus_rect = NSMakeRect(hp_action_x + 42, row_y + 14, 28, 28)
-                self.hp_button_rects.append((minus_rect, index, -1))
-                self.hp_button_rects.append((plus_rect, index, 1))
-                draw_text("-", minus_rect.origin.x + 9, minus_rect.origin.y + 5, 17, white, True)
-                draw_text("+", plus_rect.origin.x + 8, plus_rect.origin.y + 5, 15, white, True)
+                hp_button_w = hp_action_w
+                hp_button_h = 28
+                hp_button_y = row_y + (row_h - hp_button_h) / 2
+                hp_button_rect = NSMakeRect(hp_action_x, hp_button_y, hp_button_w, hp_button_h)
+                self.hp_button_rects.append((hp_button_rect, index))
+                draw_rounded_rect(
+                    hp_button_rect,
+                    ui_color(0.115, 0.115, 0.122, 1.0),
+                    ui_color(0.30, 0.30, 0.33, 1.0),
+                    7,
+                    1,
+                )
+                draw_centered_text_in_rect("+/-", hp_button_rect, 13, white, True)
 
                 current_hp, max_hp = self._hp_values(combatant)
-                draw_rounded_rect(NSMakeRect(bar_x, bar_y, bar_w, bar_h), ui_color(0.22, 0.22, 0.23, 1.0), None, 4)
+                bar_rect = NSMakeRect(bar_x, bar_y, bar_w, bar_h)
                 if current_hp is not None and max_hp is not None and max_hp > 0:
-                    ratio = max(0.0, min(1.0, current_hp / max_hp))
-                    fill_color = red if ratio <= 0 else pink if ratio <= 0.35 else green
-                    draw_rounded_rect(NSMakeRect(bar_x, bar_y, bar_w * ratio, bar_h), fill_color, None, 4)
+                    try:
+                        temp_hp = max(0, int(str(combatant.get("temp_hp") or "0")))
+                    except ValueError:
+                        temp_hp = 0
+                    effective_max = max_hp + temp_hp
+                    hp_ratio = max(0.0, min(1.0, current_hp / effective_max))
+                    temp_ratio = max(0.0, min(1.0 - hp_ratio, temp_hp / effective_max))
+                    fill_color = red if current_hp <= 0 else pink if current_hp / max_hp <= 0.35 else green
+                    draw_segmented_rounded_bar(
+                        bar_rect,
+                        [
+                            (bar_w * hp_ratio, fill_color),
+                            (bar_w * temp_ratio, temp_blue),
+                        ],
+                        ui_color(0.22, 0.22, 0.23, 1.0),
+                        4,
+                    )
                     hp_text = f"{current_hp}/{max_hp}"
                 else:
+                    draw_segmented_rounded_bar(bar_rect, [], ui_color(0.22, 0.22, 0.23, 1.0), 4)
                     hp_text = "-"
-                draw_text(hp_text, hp_text_x, row_y + 16, 12, muted, False)
+                draw_right_fitted_text_centered(hp_text, NSMakeRect(hp_text_x, bar_y, hp_text_w, bar_h), 12, muted, False)
             else:
                 pass
 
-            draw_text(str(combatant.get("ac") or "?"), ac_x, row_y + 17, 15, white, False)
+            draw_centered_text_in_rect(str(combatant.get("ac") or "?"), NSMakeRect(ac_x, row_y + 14, ac_w, 28), 15, white, False)
 
-            if is_current and not compact:
-                badge = NSMakeRect(badge_x, row_y + 16, 68, 24)
-                draw_rounded_rect(badge, ui_color(0.10, 0.10, 0.105, 1.0), ui_color(0.28, 0.28, 0.30, 1.0), 10, 1)
-                draw_text("Current", badge.origin.x + 11, badge.origin.y + 5, 11, white, True)
-            elif is_down and not compact:
+            if is_down and not compact:
                 draw_text("Down", badge_x + 16, row_y + 19, 12, pink, True)
 
             row_y += row_h + gap
@@ -1906,16 +2509,26 @@ class MainWindowController(NSObject):
     editing_party_index: int
     editing_characters: list[dict[str, str]]
     party_editor_panel: NSPanel
+    hp_adjust_panel: NSPanel
+    hp_adjust_index: int
+    hp_adjust_amount_field: NSTextField
+    hp_adjust_temp_field: NSTextField
     editor_party_name_field: NSTextField
     editor_character_name_field: NSTextField
     editor_character_class_popup: NSPopUpButton
     editor_character_ac_field: NSTextField
     editor_character_popup: NSPopUpButton
     editor_character_list: NSTextView
-    monster_sheet_panel: NSPanel
+    monster_sheet_drawer: NSView
+    monster_sheet_title: NSTextField
+    monster_sheet_close_button: NSButton
+    monster_sheet_scroll: NSScrollView
     monster_sheet_body: DiceTextView
+    monster_sheet_hp_label: NSTextField
     monster_sheet_hp_field: NSTextField
+    monster_sheet_save_button: NSButton
     monster_sheet_roll_label: NSTextField
+    monster_sheet_ability_buttons: list[StatBlockAbilityButton]
     monster_sheet_combatant_index: int
     notes_title: NSTextField
     notes_hint: NSTextField
@@ -1937,6 +2550,7 @@ class MainWindowController(NSObject):
     monster_search_field: NSTextField
     monster_search_button: NSButton
     monster_result_buttons: list[NSButton]
+    monster_add_buttons: list[NSButton]
     spell_search_field: NSTextField
     spell_roll_label: NSTextField
     spell_result_buttons: list[NSButton]
@@ -1946,6 +2560,9 @@ class MainWindowController(NSObject):
     dice_hint_label: NSTextField
     dice_formula_label: NSTextField
     dice_result_label: NSTextField
+    dice_history_title_label: NSTextField
+    dice_history_scroll: NSScrollView
+    dice_history_view: NSTextView
     dice_roll_button: NSButton
     dice_clear_button: NSButton
     dice_preset_buttons: list[NSButton]
@@ -1976,10 +2593,13 @@ class MainWindowController(NSObject):
         self.combatants = []
         self.monster_results = []
         self.monster_result_buttons = []
+        self.monster_add_buttons = []
         self.displayed_spells = []
         self.spell_result_buttons = []
         self.dice_preset_buttons = []
         self.dice_pool = {4: 0, 6: 0, 8: 0, 10: 0, 12: 0, 20: 0}
+        if self not in DICE_HISTORY_LISTENERS:
+            DICE_HISTORY_LISTENERS.append(self)
         self.party_member_labels = []
         self.party_member_icon_views = []
         self.party_member_name_labels = []
@@ -1993,10 +2613,20 @@ class MainWindowController(NSObject):
         self.round_number = 1
         self.editing_party_index = -1
         self.editing_characters = []
-        self.monster_sheet_panel = None
+        self.hp_adjust_panel = None
+        self.hp_adjust_index = -1
+        self.hp_adjust_amount_field = None
+        self.hp_adjust_temp_field = None
+        self.monster_sheet_drawer = None
+        self.monster_sheet_title = None
+        self.monster_sheet_close_button = None
+        self.monster_sheet_scroll = None
         self.monster_sheet_body = None
+        self.monster_sheet_hp_label = None
         self.monster_sheet_hp_field = None
+        self.monster_sheet_save_button = None
         self.monster_sheet_roll_label = None
+        self.monster_sheet_ability_buttons = []
         self.monster_sheet_combatant_index = -1
 
         screen = NSScreen.mainScreen().visibleFrame()
@@ -2038,12 +2668,55 @@ class MainWindowController(NSObject):
         self.dice_panel = NSView.alloc().initWithFrame_(NSMakeRect(20, 20, width - 40, height - 74))
         style_layer(self.dice_panel, ui_color(0.015, 0.015, 0.017, 1.0), ui_color(0.12, 0.12, 0.13, 1.0), 14, 1)
 
+        self.monster_sheet_drawer = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, height - 48))
+        style_layer(self.monster_sheet_drawer, ui_color(0.055, 0.055, 0.062, 1.0), ui_color(0.18, 0.18, 0.19, 1.0), 12, 1)
+        self.monster_sheet_drawer.setHidden_(True)
+        self.monster_sheet_title = make_label("", (0, 0, 260, 28), 18, True)
+        self.monster_sheet_title.setUsesSingleLineMode_(True)
+        self.monster_sheet_title.setLineBreakMode_(4)
+        self.monster_sheet_close_button = self._make_button("Close", (0, 0, 72, 28), "closeMonsterSheet:")
+        self.monster_sheet_hp_label = make_label("Current HP", (0, 0, 90, 24), 13, True)
+        self.monster_sheet_hp_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 72, 26))
+        self.monster_sheet_save_button = self._make_button("Save HP", (0, 0, 84, 26), "saveMonsterHp:")
+        self.monster_sheet_roll_label = make_label("", (0, 0, 300, 22), 12, True)
+        self.monster_sheet_roll_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
+        self.monster_sheet_hp_label.setHidden_(True)
+        self.monster_sheet_hp_field.setHidden_(True)
+        self.monster_sheet_save_button.setHidden_(True)
+        self.monster_sheet_roll_label.setHidden_(True)
+        self.monster_sheet_ability_buttons = []
+        for _index in range(6):
+            button = StatBlockAbilityButton.alloc().initWithFrame_(NSMakeRect(0, 0, 44, 72))
+            self.monster_sheet_ability_buttons.append(button)
+        self.monster_sheet_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 400))
+        self.monster_sheet_scroll.setHasVerticalScroller_(True)
+        self.monster_sheet_scroll.setAutohidesScrollers_(False)
+        self.monster_sheet_scroll.setDrawsBackground_(False)
+        self.monster_sheet_scroll.setBorderType_(0)
+        self.monster_sheet_body = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 400))
+        self.monster_sheet_body.setFont_(NSFont.systemFontOfSize_(13))
+        self.monster_sheet_body.setTextColor_(NSColor.whiteColor())
+        self.monster_sheet_body.setRollTarget_(self)
+        self.monster_sheet_body.setSpellTarget_(self)
+        self.monster_sheet_scroll.setDocumentView_(self.monster_sheet_body)
+        for view in (
+            self.monster_sheet_title,
+            self.monster_sheet_close_button,
+            self.monster_sheet_scroll,
+        ):
+            self.monster_sheet_drawer.addSubview_(view)
+        for button in self.monster_sheet_ability_buttons:
+            self.monster_sheet_drawer.addSubview_(button)
+
         self.notes_title = make_label("Initiative Tracker", (0, 0, 220, 28), 18, True)
         self.notes_hint = make_label("Combat Round Tracker", (0, 0, 220, 20), 12)
         self.notes_hint.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
         self.sidebar_logo_label = make_label("✦", (0, 0, 36, 36), 20, True)
         self.sidebar_logo_label.setAlignment_(1)
         style_layer(self.sidebar_logo_label, ui_color(0.12, 0.39, 0.74, 1.0), ui_color(0.18, 0.46, 0.84, 1.0), 10, 1)
+        self.notes_title.setHidden_(True)
+        self.notes_hint.setHidden_(True)
+        self.sidebar_logo_label.setHidden_(True)
         self.sidebar_footer_label = make_label("", (0, 0, 300, 24), 13)
         self.sidebar_footer_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
         self.sidebar_footer_label.setHidden_(True)
@@ -2059,13 +2732,14 @@ class MainWindowController(NSObject):
 
         self.tracker_title = make_label("Round 1", (0, 0, 300, 28), 18, True)
         self.party_label = make_label("Party", (0, 0, 60, 24), 16, True)
-        self.party_popup = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 180, 28))
+        self.party_popup = StyledPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 180, 28))
         self.party_popup.setTarget_(self)
         self.party_popup.setAction_("selectParty:")
         self.new_party_button = self._make_button("+", (0, 0, 32, 28), "newParty:")
         self.edit_party_button = self._make_button("Edit", (0, 0, 64, 28), "editParty:")
         self.delete_party_button = self._make_button("Delete", (0, 0, 70, 28), "deleteParty:")
-        self.start_fight_button = self._make_button("Add Party to Initiative", (0, 0, 190, 30), "startFight:")
+        self.start_fight_button = self._make_button("Go", (0, 0, 34, 28), "startFight:")
+        self.start_fight_button.setToolTip_("Add party to initiative")
 
         self.party_status_label = make_multiline(make_label("", (0, 0, 300, 40), 11))
         self.party_status_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
@@ -2095,30 +2769,35 @@ class MainWindowController(NSObject):
         self.monster_search_field.setTarget_(self)
         self.monster_search_field.setAction_("searchMonsters:")
         self.monster_search_field.setDelegate_(self)
+        style_text_input(self.monster_search_field)
         self.monster_search_button = self._make_button("Search", (0, 0, 80, 26), "searchMonsters:")
         self.monster_search_button.setHidden_(True)
 
         for index in range(8):
-            button = self._make_button(
-                "",
-                (0, 0, 100, 36),
-                "addMonster:",
-            )
+            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, MONSTER_RESULT_ROW_HEIGHT))
             button.setTag_(index)
             button.setHidden_(True)
-            button.setAlignment_(0)
             self.monster_result_buttons.append(button)
+            add_button = RowAddButton.alloc().initWithFrame_(NSMakeRect(0, 0, 28, MONSTER_RESULT_ROW_HEIGHT))
+            add_button.setTarget_(self)
+            add_button.setAction_("addMonster:")
+            add_button.setTag_(index)
+            add_button.setHidden_(True)
+            add_button.setToolTip_("Add creature to initiative")
+            self.monster_add_buttons.append(add_button)
 
         self.spell_search_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 28))
         self.spell_search_field.setPlaceholderString_("Search spells in English or Italian")
         self.spell_search_field.setDelegate_(self)
+        style_text_input(self.spell_search_field)
         self.spell_roll_label = make_label("Click a green dice expression to roll.", (0, 0, 320, 24), 12, True)
         self.spell_roll_label.setTextColor_(ui_color(0.58, 0.95, 0.28, 1.0))
         for index in range(18):
-            button = self._make_button("", (0, 0, 100, 34), "selectSpellResult:")
+            button = SearchResultButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, SPELL_RESULT_ROW_HEIGHT))
+            button.setTarget_(self)
+            button.setAction_("selectSpellResult:")
             button.setTag_(index)
             button.setHidden_(True)
-            button.setAlignment_(0)
             self.spell_result_buttons.append(button)
         self.spell_detail_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.spell_detail_scroll.setHasVerticalScroller_(True)
@@ -2132,8 +2811,9 @@ class MainWindowController(NSObject):
         self.spell_detail_scroll.setDocumentView_(self.spell_detail_view)
 
         self.dice_title_label = make_label("Dice Roller", (0, 0, 240, 32), 24, True)
-        self.dice_hint_label = make_label("Click dice to build a pool. Example: three d4 clicks and two d6 clicks becomes 3d4+2d6.", (0, 0, 720, 24), 13)
+        self.dice_hint_label = make_label("", (0, 0, 720, 24), 13)
         self.dice_hint_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.dice_hint_label.setHidden_(True)
         self.dice_control_labels = []
         self.dice_clear_button = self._make_button("Clear", (0, 0, 100, 34), "clearDicePool:")
         self.dice_roll_button = self._make_button("Roll Dice", (0, 0, 130, 34), "rollCustomDice:")
@@ -2143,6 +2823,22 @@ class MainWindowController(NSObject):
         self.dice_result_label = make_label("", (0, 0, 520, 24), 13, True)
         self.dice_result_label.setAlignment_(1)
         self.dice_result_label.setTextColor_(ui_color(0.72, 0.72, 0.75, 1.0))
+        self.dice_history_title_label = make_label("Recent Rolls", (0, 0, 220, 24), 16, True)
+        self.dice_history_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 260))
+        self.dice_history_scroll.setHasVerticalScroller_(True)
+        self.dice_history_scroll.setAutohidesScrollers_(False)
+        self.dice_history_scroll.setDrawsBackground_(False)
+        self.dice_history_scroll.setBorderType_(0)
+        style_layer(self.dice_history_scroll, ui_color(0.070, 0.070, 0.078, 1.0), ui_color(0.18, 0.18, 0.19, 1.0), 8, 1)
+        self.dice_history_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 260))
+        self.dice_history_view.setEditable_(False)
+        self.dice_history_view.setSelectable_(True)
+        self.dice_history_view.setFont_(NSFont.systemFontOfSize_(12))
+        self.dice_history_view.setTextColor_(ui_color(0.78, 0.78, 0.80, 1.0))
+        self.dice_history_view.setBackgroundColor_(ui_color(0.070, 0.070, 0.078, 1.0))
+        self.dice_history_view.setTextContainerInset_(NSMakeSize(10, 10))
+        self.dice_history_scroll.setDocumentView_(self.dice_history_view)
+        self.refreshDiceHistory()
         self.dice_presets = (4, 6, 8, 10, 12, 20)
         for sides in self.dice_presets:
             button = self._make_button(f"d{sides}", (0, 0, 76, 58), "addDieToPool:")
@@ -2170,6 +2866,7 @@ class MainWindowController(NSObject):
         self.content_view.addSubview_(self.sidebar_panel)
         self.content_view.addSubview_(self.sidebar_scroll)
         self.content_view.addSubview_(self.combat_panel)
+        self.content_view.addSubview_(self.monster_sheet_drawer)
         self.content_view.addSubview_(self.spell_panel)
         self.content_view.addSubview_(self.dice_panel)
         self.content_view.addSubview_(self.initiative_tab_button)
@@ -2206,6 +2903,8 @@ class MainWindowController(NSObject):
                 self.sidebar_content.addSubview_(label)
         for button in self.monster_result_buttons:
             self.sidebar_content.addSubview_(button)
+        for button in self.monster_add_buttons:
+            self.sidebar_content.addSubview_(button)
         for view in (
             self.tracker_title,
             self.previous_turn_button,
@@ -2224,6 +2923,8 @@ class MainWindowController(NSObject):
             self.dice_hint_label,
             self.dice_formula_label,
             self.dice_result_label,
+            self.dice_history_title_label,
+            self.dice_history_scroll,
             self.dice_clear_button,
             self.dice_roll_button,
         ):
@@ -2241,6 +2942,7 @@ class MainWindowController(NSObject):
             self.clear_tracker_button,
             self.turn_label,
             self.tracker_scroll,
+            self.monster_sheet_drawer,
         ]
         self.spell_views = [
             self.spell_panel,
@@ -2252,9 +2954,10 @@ class MainWindowController(NSObject):
         self.dice_views = [
             self.dice_panel,
             self.dice_title_label,
-            self.dice_hint_label,
             self.dice_formula_label,
             self.dice_result_label,
+            self.dice_history_title_label,
+            self.dice_history_scroll,
             self.dice_clear_button,
             self.dice_roll_button,
             *self.dice_preset_buttons,
@@ -2293,19 +2996,57 @@ class MainWindowController(NSObject):
         sidebar_margin = 24
         panel_x = sidebar_width + outer_gap
         panel_y = 20
-        panel_width = max(560, width - panel_x - outer_gap)
+        available_panel_width = max(420, width - panel_x - outer_gap)
+        drawer_open = self.current_tab == "initiative" and self.monster_sheet_combatant_index >= 0
+        drawer_gap = 16
+        drawer_width = 0
+        if drawer_open:
+            preferred_drawer_width = min(420, max(320, int(width * 0.30)))
+            max_drawer_width = available_panel_width - 360 - drawer_gap
+            drawer_width = max(280, min(preferred_drawer_width, max_drawer_width))
+            panel_width = max(340, available_panel_width - drawer_width - drawer_gap)
+        else:
+            panel_width = max(560, available_panel_width)
         panel_height = max(560, content_height - panel_y)
         party = self.selectedParty()
         characters = party.get("characters", [])
         if not isinstance(characters, list):
             characters = []
         visible_party_rows = min(len([character for character in characters if isinstance(character, dict)]), len(self.party_member_labels))
-        sidebar_document_height = max(content_height, 430 + visible_party_rows * 42 + len(self.monster_result_buttons) * 42)
+        sidebar_document_height = max(
+            content_height,
+            430 + visible_party_rows * 42 + len(self.monster_result_buttons) * MONSTER_RESULT_ROW_STEP,
+        )
 
         self.sidebar_panel.setFrame_(NSMakeRect(0, 0, sidebar_width, content_height))
         self.sidebar_scroll.setFrame_(NSMakeRect(0, 0, sidebar_width, content_height))
         self.sidebar_content.setFrame_(NSMakeRect(0, 0, sidebar_width, sidebar_document_height))
         self.combat_panel.setFrame_(NSMakeRect(panel_x, panel_y, panel_width, panel_height))
+        self.monster_sheet_drawer.setHidden_(not drawer_open)
+        if drawer_open:
+            drawer_x = panel_x + panel_width + drawer_gap
+            self.monster_sheet_drawer.setFrame_(NSMakeRect(drawer_x, panel_y, drawer_width, panel_height))
+            drawer_margin = 20
+            drawer_inner_width = max(240, drawer_width - drawer_margin * 2)
+            drawer_top = panel_height - 48
+            self.monster_sheet_title.setFrame_(NSMakeRect(drawer_margin, drawer_top, max(120, drawer_inner_width - 88), 28))
+            self.monster_sheet_close_button.setFrame_(NSMakeRect(drawer_width - drawer_margin - 72, drawer_top, 72, 28))
+            ability_y = panel_height - 132
+            ability_button_width = min(44, max(34, (drawer_inner_width - 5 * 6) / 6))
+            ability_gap = (drawer_inner_width - ability_button_width * 6) / 5 if len(self.monster_sheet_ability_buttons) > 1 else 0
+            for index, button in enumerate(self.monster_sheet_ability_buttons):
+                button.setFrame_(NSMakeRect(drawer_margin + index * (ability_button_width + ability_gap), ability_y, ability_button_width, 76))
+            scroll_y = 20
+            scroll_height = max(300, ability_y - 36)
+            self.monster_sheet_scroll.setFrame_(NSMakeRect(drawer_margin, scroll_y, drawer_inner_width, scroll_height))
+            body_width = max(220, drawer_inner_width - 24)
+            self.monster_sheet_body.textContainer().setContainerSize_(NSMakeSize(body_width, 100000))
+            self.monster_sheet_body.layoutManager().ensureLayoutForTextContainer_(self.monster_sheet_body.textContainer())
+            body_height = max(
+                scroll_height,
+                self.monster_sheet_body.layoutManager().usedRectForTextContainer_(self.monster_sheet_body.textContainer()).size.height + 24,
+            )
+            self.monster_sheet_body.setFrame_(NSMakeRect(0, 0, body_width, body_height))
         self.spell_panel.setFrame_(NSMakeRect(20, 20, width - 40, max(520, content_height - 20)))
 
         y = sidebar_document_height - 52
@@ -2316,13 +3057,14 @@ class MainWindowController(NSObject):
         self.notes_scroll.setFrame_(NSMakeRect(sidebar_margin, 20, sidebar_width - sidebar_margin * 2, 120))
         self.notes_view.setFrame_(NSMakeRect(0, 0, sidebar_width - sidebar_margin * 2 - 24, 120))
 
-        y -= 84
+        y -= 18
         self.party_popup.setFrame_(NSMakeRect(sidebar_margin, y, sidebar_width - sidebar_margin * 2, 34))
         y -= 70
         self.party_label.setFrame_(NSMakeRect(sidebar_margin, y + 4, 120, 24))
         self.new_party_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 34, y, 34, 28))
-        self.edit_party_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 106, y, 64, 28))
-        self.delete_party_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 184, y, 70, 28))
+        self.edit_party_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 104, y, 62, 28))
+        self.delete_party_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 180, y, 68, 28))
+        self.start_fight_button.setFrame_(NSMakeRect(sidebar_width - sidebar_margin - 222, y, 34, 28))
         y -= 46
 
         card_width = sidebar_width - sidebar_margin * 2
@@ -2345,29 +3087,46 @@ class MainWindowController(NSObject):
             self.party_member_ac_labels[index].setFrame_(NSMakeRect(row_ac_x, row_y, ac_w, 20))
         y -= visible_party_rows * 42 + 8
         self.party_status_label.setFrame_(NSMakeRect(sidebar_margin, y, card_width, 38))
-        y -= 42
-        self.start_fight_button.setFrame_(NSMakeRect(sidebar_margin, y, card_width, 34))
 
         y -= 70
         self.monster_label.setFrame_(NSMakeRect(sidebar_margin, y + 4, 140, 24))
         y -= 40
-        self.monster_search_field.setFrame_(NSMakeRect(sidebar_margin, y, card_width, 28))
+        self.monster_search_field.setFrame_(NSMakeRect(sidebar_margin, y - 3, card_width, 34))
         self.monster_search_button.setFrame_(NSMakeRect(sidebar_margin + card_width - 76, y, 76, 28))
-        y -= 44
+        y -= 52
+        monster_add_w = 22
+        monster_result_gap = 10
+        monster_result_w = max(180, card_width - monster_add_w - monster_result_gap)
         for index, button in enumerate(self.monster_result_buttons):
-            button.setFrame_(NSMakeRect(sidebar_margin, y - index * 42, card_width, 36))
+            row_y = y - index * MONSTER_RESULT_ROW_STEP
+            button.setFrame_(NSMakeRect(sidebar_margin, row_y, monster_result_w, MONSTER_RESULT_ROW_HEIGHT))
+            if index < len(self.monster_add_buttons):
+                self.monster_add_buttons[index].setFrame_(
+                    NSMakeRect(sidebar_margin + monster_result_w + monster_result_gap, row_y, monster_add_w, MONSTER_RESULT_ROW_HEIGHT)
+                )
         top_scroll_y = max(0, sidebar_document_height - content_height)
         self.sidebar_scroll.contentView().scrollToPoint_(NSMakePoint(0, top_scroll_y))
         self.sidebar_scroll.reflectScrolledClipView_(self.sidebar_scroll.contentView())
 
         header_y = panel_y + panel_height - 58
-        self.tracker_title.setFrame_(NSMakeRect(panel_x + 32, header_y, 220, 28))
-        self.turn_label.setFrame_(NSMakeRect(panel_x + 260, header_y + 2, panel_width - 292, 24))
+        title_width = min(220, max(140, panel_width - 64))
+        self.tracker_title.setFrame_(NSMakeRect(panel_x + 32, header_y, title_width, 28))
+        turn_x = panel_x + 32 + title_width + 12
+        turn_width = max(0, panel_x + panel_width - 28 - turn_x)
+        self.turn_label.setFrame_(NSMakeRect(turn_x, header_y + 2, turn_width, 24))
 
-        bottom_height = 66
-        self.clear_tracker_button.setFrame_(NSMakeRect(panel_x + 28, panel_y + 18, 150, 34))
-        self.previous_turn_button.setFrame_(NSMakeRect(panel_x + panel_width - 244, panel_y + 18, 104, 34))
-        self.next_turn_button.setFrame_(NSMakeRect(panel_x + panel_width - 128, panel_y + 18, 100, 34))
+        compact_tracker_controls = panel_width < 540
+        bottom_height = 102 if compact_tracker_controls else 66
+        if compact_tracker_controls:
+            self.clear_tracker_button.setFrame_(NSMakeRect(panel_x + 28, panel_y + 18, 132, 34))
+            nav_width = 196
+            nav_x = panel_x + max(28, panel_width - nav_width - 28)
+            self.previous_turn_button.setFrame_(NSMakeRect(nav_x, panel_y + 58, 104, 34))
+            self.next_turn_button.setFrame_(NSMakeRect(nav_x + 116, panel_y + 58, 80, 34))
+        else:
+            self.clear_tracker_button.setFrame_(NSMakeRect(panel_x + 28, panel_y + 18, 150, 34))
+            self.previous_turn_button.setFrame_(NSMakeRect(panel_x + panel_width - 244, panel_y + 18, 104, 34))
+            self.next_turn_button.setFrame_(NSMakeRect(panel_x + panel_width - 128, panel_y + 18, 100, 34))
 
         tracker_x = panel_x + 24
         tracker_y = panel_y + bottom_height
@@ -2382,11 +3141,11 @@ class MainWindowController(NSObject):
         spell_y = spell_panel_frame.origin.y + spell_margin
         spell_width = spell_panel_frame.size.width - spell_margin * 2
         spell_height = spell_panel_frame.size.height - spell_margin * 2
-        list_width = min(360, max(280, spell_width * 0.34))
-        self.spell_search_field.setFrame_(NSMakeRect(spell_x, spell_y + spell_height - 34, list_width, 28))
-        results_top = spell_y + spell_height - 78
+        list_width = min(430, max(320, spell_width * 0.38))
+        self.spell_search_field.setFrame_(NSMakeRect(spell_x, spell_y + spell_height - 42, list_width, 34))
+        results_top = spell_y + spell_height - 92
         for index, button in enumerate(self.spell_result_buttons):
-            button.setFrame_(NSMakeRect(spell_x, results_top - index * 38, list_width, 34))
+            button.setFrame_(NSMakeRect(spell_x, results_top - index * SPELL_RESULT_ROW_STEP, list_width, SPELL_RESULT_ROW_HEIGHT))
         detail_x = spell_x + list_width + 28
         detail_width = max(300, spell_width - list_width - 28)
         self.spell_roll_label.setFrame_(NSMakeRect(detail_x, spell_y + spell_height - 26, detail_width, 22))
@@ -2399,14 +3158,24 @@ class MainWindowController(NSObject):
             dice_panel_frame = self.dice_panel.frame()
         self.dice_panel.setFrame_(NSMakeRect(20, 20, width - 40, max(520, content_height - 20)))
         dice_panel_frame = self.dice_panel.frame()
-        dice_center_x = dice_panel_frame.origin.x + dice_panel_frame.size.width / 2
         dice_top = dice_panel_frame.origin.y + dice_panel_frame.size.height - 78
         self.dice_title_label.setFrame_(NSMakeRect(dice_panel_frame.origin.x + 44, dice_top, 320, 34))
         self.dice_hint_label.setFrame_(NSMakeRect(dice_panel_frame.origin.x + 44, dice_top - 28, min(640, dice_panel_frame.size.width - 88), 24))
+        self.dice_hint_label.setHidden_(True)
 
-        controls_width = 620
-        controls_x = dice_center_x - controls_width / 2
-        controls_y = dice_top - 116
+        history_w = min(380, max(300, dice_panel_frame.size.width * 0.30))
+        history_x = dice_panel_frame.origin.x + dice_panel_frame.size.width - history_w - 44
+        history_top = dice_top
+        history_h = max(250, dice_panel_frame.size.height - 150)
+        self.dice_history_title_label.setFrame_(NSMakeRect(history_x, history_top + 4, history_w, 24))
+        self.dice_history_scroll.setFrame_(NSMakeRect(history_x, dice_panel_frame.origin.y + 44, history_w, history_h))
+        self.dice_history_view.setFrame_(NSMakeRect(0, 0, max(240, history_w - 24), max(history_h, self.dice_history_view.frame().size.height)))
+
+        controls_right = history_x - 34
+        controls_left = dice_panel_frame.origin.x + 44
+        controls_width = max(420, controls_right - controls_left)
+        dice_center_x = controls_left + controls_width / 2
+        controls_y = dice_top - 104
 
         die_button_w = 82
         die_button_gap = 14
@@ -2416,6 +3185,7 @@ class MainWindowController(NSObject):
             button.setFrame_(NSMakeRect(die_x + index * (die_button_w + die_button_gap), controls_y, die_button_w, 58))
 
         formula_width = min(680, dice_panel_frame.size.width - 88)
+        formula_width = min(formula_width, max(360, controls_width))
         self.dice_formula_label.setFrame_(NSMakeRect(dice_center_x - formula_width / 2, controls_y - 92, formula_width, 46))
         self.dice_result_label.setFrame_(NSMakeRect(dice_center_x - formula_width / 2, controls_y - 126, formula_width, 24))
 
@@ -2485,6 +3255,10 @@ class MainWindowController(NSObject):
             self.searchMonsters_(None)
         elif field == self.spell_search_field:
             self.refreshSpellResults()
+
+    def refreshDiceHistory(self):
+        if self.dice_history_view is not None:
+            self.dice_history_view.setString_(format_dice_roll_history())
 
     def currentDiceExpression(self) -> str:
         parts = []
@@ -2562,6 +3336,8 @@ class MainWindowController(NSObject):
         for party in self.parties:
             self.party_popup.addItemWithTitle_(str(party.get("name") or "Unnamed Party"))
         self.party_popup.selectItemAtIndex_(min(self.selectedPartyIndex(), max(0, len(self.parties) - 1)))
+        self.party_popup.setNeedsDisplay_(True)
+        self.layoutMainWindow()
         self.syncPartyFields()
 
     def syncPartyFields(self):
@@ -2608,6 +3384,8 @@ class MainWindowController(NSObject):
             self.party_status_label.setStringValue_("No characters yet. Create or edit a party.")
 
     def selectParty_(self, _sender):
+        self.party_popup.setNeedsDisplay_(True)
+        self.layoutMainWindow()
         self.syncPartyFields()
 
     def newParty_(self, _sender):
@@ -2888,11 +3666,16 @@ class MainWindowController(NSObject):
         query = str(self.monster_search_field.stringValue()).strip()
         self.monster_results = search_creatures(query, self.creatures, len(self.monster_result_buttons))
         for index, button in enumerate(self.monster_result_buttons):
+            add_button = self.monster_add_buttons[index] if index < len(self.monster_add_buttons) else None
             if index >= len(self.monster_results):
                 button.setHidden_(True)
+                if add_button is not None:
+                    add_button.setHidden_(True)
                 continue
-            button.setTitle_(creature_summary(self.monster_results[index]))
+            button.configureMonsterResult_(self.monster_results[index])
             button.setHidden_(False)
+            if add_button is not None:
+                add_button.setHidden_(False)
 
     def refreshSpellResults(self):
         query = str(self.spell_search_field.stringValue()).strip()
@@ -2902,10 +3685,7 @@ class MainWindowController(NSObject):
                 button.setHidden_(True)
                 continue
             spell = self.displayed_spells[index]
-            italian = f" ({spell.italian_name})" if spell.italian_name else ""
-            meta = " | ".join(part for part in (spell.level, spell.school) if part)
-            suffix = f" - {meta}" if meta else ""
-            button.setTitle_(f"{spell.name}{italian}{suffix}")
+            button.configureSpellResult_(spell)
             button.setHidden_(False)
         if self.displayed_spells:
             self.showSpellInDetail_(self.displayed_spells[0])
@@ -2931,7 +3711,7 @@ class MainWindowController(NSObject):
             "",
             body,
             "",
-            f"Components: {spell.components or '-'}",
+            f"Components: {component_badge_text(spell.components) or '-'}",
             f"Range: {spell.range or '-'}",
             f"Duration: {spell.duration or '-'}",
         ]
@@ -3025,6 +3805,7 @@ class MainWindowController(NSObject):
         self.combatants = []
         self.current_turn_index = 0
         self.round_number = 1
+        self.closeMonsterSheet_(None)
         self.refreshTracker()
 
     def refreshTracker(self):
@@ -3101,20 +3882,17 @@ class MainWindowController(NSObject):
 
     def _monster_body_for_creature(self, creature: Creature) -> str:
         raw = creature.raw
-        stat_names = ("STR", "DEX", "CON", "INT", "WIS", "CHA")
-        stat_parts = [
-            f"{name} {score} ({ability_modifier(score):+d})"
-            for name, score in zip(stat_names, creature.stats)
-        ]
+        hit_dice = clean_text(raw.get("hit_dice", ""), MAX_SHORT_FIELD_CHARS)
+        hit_points = f"Hit Points: {creature.hp}"
+        if hit_dice:
+            hit_points = f"{hit_points} ({hit_dice})"
         lines = [
             f"{creature.size} {creature.creature_type}, {creature.alignment}".strip(" ,"),
             f"Source: {creature.source or clean_text(raw.get('source', ''), MAX_SHORT_FIELD_CHARS)}",
             f"Armor Class: {display_ac(creature.ac)}",
-            f"Hit Points: {creature.hp} ({clean_text(raw.get('hit_dice', ''), MAX_SHORT_FIELD_CHARS)})".rstrip(" ()"),
+            hit_points,
             f"Speed: {creature.speed or '-'}",
             "",
-            "Abilities:",
-            " | ".join(stat_parts),
         ]
         saves = self._format_bonus_entries(raw.get("saves"))
         skills = self._format_bonus_entries(raw.get("skillsaves"))
@@ -3150,6 +3928,144 @@ class MainWindowController(NSObject):
         if combatant.get("kind") != "Monster":
             return
         self.openMonsterSheetForCombatant_(combatant_index)
+
+    def _make_hp_adjust_panel(self):
+        width = 302
+        height = 142
+        style = NSWindowStyleMaskBorderless
+        panel = ContextInputPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, width, height),
+            style,
+            NSBackingStoreBuffered,
+            False,
+        )
+        panel.setTitle_("")
+        panel.setFloatingPanel_(True)
+        panel.setHidesOnDeactivate_(True)
+        panel.setOpaque_(False)
+        panel.setHasShadow_(True)
+        panel.setBackgroundColor_(ui_color(0.075, 0.075, 0.080, 0.98))
+
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        style_layer(content, ui_color(0.075, 0.075, 0.080, 1.0), ui_color(0.22, 0.22, 0.24, 1.0), 12, 1)
+        amount_label = make_label("Amount", (18, 104, 80, 20), 12, True)
+        amount_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
+        self.hp_adjust_amount_field = NSTextField.alloc().initWithFrame_(NSMakeRect(18, 72, 56, 28))
+        self.hp_adjust_amount_field.setStringValue_("1")
+        style_number_input(self.hp_adjust_amount_field)
+
+        heal_button = self._make_button("Heal", (92, 72, 72, 30), "applyHpMenuAction:")
+        heal_button.setTag_(1)
+        damage_button = self._make_button("Damage", (178, 72, 100, 30), "applyHpMenuAction:")
+        damage_button.setTag_(-1)
+
+        temp_label = make_label("Temp", (18, 44, 80, 20), 12, True)
+        temp_label.setTextColor_(ui_color(0.68, 0.68, 0.70, 1.0))
+        self.hp_adjust_temp_field = NSTextField.alloc().initWithFrame_(NSMakeRect(18, 12, 56, 28))
+        self.hp_adjust_temp_field.setStringValue_("0")
+        style_number_input(self.hp_adjust_temp_field)
+        temp_button = self._make_button("Temp HP", (92, 12, 98, 30), "applyHpMenuAction:")
+        temp_button.setTag_(2)
+
+        for view in (
+            amount_label,
+            self.hp_adjust_amount_field,
+            heal_button,
+            damage_button,
+            temp_label,
+            self.hp_adjust_temp_field,
+            temp_button,
+        ):
+            content.addSubview_(view)
+        panel.setContentView_(content)
+        self.hp_adjust_panel = panel
+
+    def openCombatantHpMenu_(self, payload):
+        if not isinstance(payload, dict):
+            return
+        try:
+            index = int(payload.get("index"))
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(self.combatants):
+            return
+        combatant = self.combatants[index]
+        if combatant.get("kind") != "Monster":
+            return
+        if self.hp_adjust_panel is None:
+            self._make_hp_adjust_panel()
+        self.hp_adjust_index = index
+        self.hp_adjust_amount_field.setStringValue_("1")
+        self.hp_adjust_temp_field.setStringValue_(str(combatant.get("temp_hp") or "0"))
+
+        frame = self.hp_adjust_panel.frame()
+        try:
+            point = NSMakePoint(float(payload.get("x", 0)), float(payload.get("y", 0)))
+            screen_point = self.window.convertPointToScreen_(point)
+            x = screen_point.x - frame.size.width + 44
+            y = screen_point.y - frame.size.height - 12
+        except Exception:
+            parent = self.window.frame()
+            x = parent.origin.x + parent.size.width / 2 - frame.size.width / 2
+            y = parent.origin.y + parent.size.height / 2 - frame.size.height / 2
+        screen_frame = NSScreen.mainScreen().visibleFrame()
+        margin = 12
+        x = max(screen_frame.origin.x + margin, min(x, screen_frame.origin.x + screen_frame.size.width - frame.size.width - margin))
+        y = max(screen_frame.origin.y + margin, min(y, screen_frame.origin.y + screen_frame.size.height - frame.size.height - margin))
+        self.hp_adjust_panel.setFrameOrigin_(NSMakePoint(x, y))
+        self.hp_adjust_panel.makeKeyAndOrderFront_(None)
+        self.hp_adjust_panel.makeFirstResponder_(self.hp_adjust_amount_field)
+        self.hp_adjust_amount_field.selectText_(None)
+
+    def closeCombatantHpMenu_(self, _sender):
+        if self.hp_adjust_panel is not None:
+            self.hp_adjust_panel.orderOut_(None)
+
+    def applyHpMenuAction_(self, sender):
+        index = self.hp_adjust_index
+        if index < 0 or index >= len(self.combatants):
+            return
+        combatant = self.combatants[index]
+        try:
+            action = int(sender.tag())
+        except (TypeError, ValueError):
+            return
+        amount_field = self.hp_adjust_temp_field if action == 2 else self.hp_adjust_amount_field
+        try:
+            amount = abs(int(str(amount_field.stringValue()).strip()))
+        except ValueError:
+            return
+        if action == 2:
+            combatant["temp_hp"] = str(amount)
+        else:
+            current_hp = self._combatant_hp_value(combatant)
+            if current_hp is None:
+                try:
+                    current_hp = int(str(combatant.get("max_hp") or "0"))
+                except ValueError:
+                    current_hp = 0
+            try:
+                max_hp = int(str(combatant.get("max_hp") or "0"))
+            except ValueError:
+                max_hp = 0
+            try:
+                temp_hp = max(0, int(str(combatant.get("temp_hp") or "0")))
+            except ValueError:
+                temp_hp = 0
+            if action < 0:
+                absorbed = min(temp_hp, amount)
+                temp_hp -= absorbed
+                amount -= absorbed
+                combatant["temp_hp"] = str(temp_hp)
+                next_hp = current_hp - amount
+            else:
+                next_hp = current_hp + amount
+                if max_hp > 0:
+                    next_hp = min(max_hp, next_hp)
+            combatant["hp"] = str(max(0, next_hp))
+        if self.hp_adjust_panel is not None:
+            self.hp_adjust_panel.orderOut_(None)
+        self.refreshTracker()
 
     def adjustCombatantHp_(self, payload):
         if not isinstance(payload, dict):
@@ -3200,60 +4116,31 @@ class MainWindowController(NSObject):
             return
 
         self.monster_sheet_combatant_index = index
-        width = 720
-        height = 660
-        parent_frame = self.window.frame()
-        x = parent_frame.origin.x + (parent_frame.size.width - width) / 2
-        y = parent_frame.origin.y + (parent_frame.size.height - height) / 2
-        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
-        self.monster_sheet_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, width, height),
-            style,
-            NSBackingStoreBuffered,
-            False,
-        )
-        self.monster_sheet_panel.setTitle_(creature.name)
-        self.monster_sheet_panel.setFloatingPanel_(True)
-        self.monster_sheet_panel.setHidesOnDeactivate_(False)
-        self.monster_sheet_panel.setLevel_(24)
-        self.monster_sheet_panel.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.08, 0.08, 0.10, 0.98))
-
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-        title = make_label(creature.name, (24, height - 54, width - 48, 32), 24, True)
-        title.setTextColor_(NSColor.whiteColor())
-        hp_label = make_label("Current HP", (24, height - 92, 90, 24), 13, True)
-        self.monster_sheet_hp_field = NSTextField.alloc().initWithFrame_(NSMakeRect(118, height - 92, 80, 26))
+        self.monster_sheet_title.setStringValue_(creature.name)
         self.monster_sheet_hp_field.setStringValue_(str(combatant.get("hp") or creature.hp))
-        save_hp_button = self._make_button("Save HP", (210, height - 92, 90, 26), "saveMonsterHp:")
-        self.monster_sheet_roll_label = make_label("", (320, height - 90, width - 344, 22), 12, True)
-        self.monster_sheet_roll_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0))
-
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(24, 24, width - 48, height - 132))
-        scroll.setHasVerticalScroller_(True)
-        scroll.setAutohidesScrollers_(False)
-        scroll.setDrawsBackground_(False)
-        self.monster_sheet_body = DiceTextView.alloc().initWithFrame_(NSMakeRect(0, 0, width - 72, height - 132))
-        self.monster_sheet_body.setFont_(NSFont.systemFontOfSize_(13))
-        self.monster_sheet_body.setTextColor_(NSColor.whiteColor())
-        self.monster_sheet_body.setRollTarget_(self)
-        self.monster_sheet_body.setSpellTarget_(self)
+        self.monster_sheet_roll_label.setStringValue_("")
+        stat_names = ("STR", "DEX", "CON", "INT", "WIS", "CHA")
+        for button, name, score in zip(self.monster_sheet_ability_buttons, stat_names, creature.stats):
+            button.configure_stat(name, score, ability_modifier(score), self)
 
         body = self._monster_body_for_creature(creature)
-        dice_ranges = dice_ranges_for_body(body)
-        spell_ranges = spell_ranges_for_body(body, self.spells)
-        self.monster_sheet_body.textStorage().setAttributedString_(attributed_monster_body(body, spell_ranges))
+        dice_ranges = monster_roll_ranges_for_body(body)
+        spell_ranges = spell_ranges_for_body(body, self.spells, spell_section_ranges(body))
+        self.monster_sheet_body.textStorage().setAttributedString_(attributed_monster_body(body, spell_ranges, dice_ranges))
         self.monster_sheet_body.setDiceRanges_(dice_ranges)
         self.monster_sheet_body.setSpellRanges_(spell_ranges)
-        self.monster_sheet_body.layoutManager().ensureLayoutForTextContainer_(self.monster_sheet_body.textContainer())
-        body_height = max(height - 132, self.monster_sheet_body.layoutManager().usedRectForTextContainer_(self.monster_sheet_body.textContainer()).size.height + 24)
-        self.monster_sheet_body.setFrame_(NSMakeRect(0, 0, width - 72, body_height))
-        scroll.setDocumentView_(self.monster_sheet_body)
+        self.monster_sheet_drawer.setHidden_(False)
+        self.layoutMainWindow()
 
-        for view in (title, hp_label, self.monster_sheet_hp_field, save_hp_button, self.monster_sheet_roll_label, scroll):
-            content.addSubview_(view)
-        self.monster_sheet_panel.setContentView_(content)
-        NSApp.activateIgnoringOtherApps_(True)
-        self.monster_sheet_panel.makeKeyAndOrderFront_(None)
+    def closeMonsterSheet_(self, _sender):
+        self.monster_sheet_combatant_index = -1
+        self.monster_sheet_title.setStringValue_("")
+        self.monster_sheet_roll_label.setStringValue_("")
+        self.monster_sheet_body.setString_("")
+        self.monster_sheet_body.setDiceRanges_([])
+        self.monster_sheet_body.setSpellRanges_([])
+        self.monster_sheet_drawer.setHidden_(True)
+        self.layoutMainWindow()
 
     def saveMonsterHp_(self, _sender):
         index = self.monster_sheet_combatant_index
@@ -3285,23 +4172,33 @@ class MainWindowController(NSObject):
         self.displayDiceRollResult_(result)
 
     def displayDiceRollResult_(self, result):
+        record_dice_roll_history(result)
         if self.dice_result_label is not None and self.current_tab == "dice":
             self.dice_result_label.setStringValue_(result)
         if self.spell_roll_label is not None and not self.spell_roll_label.isHidden():
             self.spell_roll_label.setStringValue_(result)
-        if (
-            self.monster_sheet_roll_label is not None
-            and self.monster_sheet_panel is not None
-            and self.monster_sheet_panel.isVisible()
-        ):
-            self.monster_sheet_roll_label.setStringValue_(result)
 
     def openSpell_(self, spell):
         if spell is None:
             return
-        self.overlay.showSpell_(spell)
+        self.current_tab = "spells"
+        self.spell_search_field.setStringValue_(spell.name)
+        self.applyCurrentTab()
+        self.refreshSpellResults()
+        if spell not in self.displayed_spells:
+            self.displayed_spells = [spell, *self.displayed_spells[: max(0, len(self.spell_result_buttons) - 1)]]
+            for index, button in enumerate(self.spell_result_buttons):
+                if index >= len(self.displayed_spells):
+                    button.setHidden_(True)
+                    continue
+                button.configureSpellResult_(self.displayed_spells[index])
+                button.setHidden_(False)
+        self.showSpellInDetail_(spell)
+        self.window.makeKeyAndOrderFront_(None)
 
     def windowWillClose_(self, _notification):
+        if self in DICE_HISTORY_LISTENERS:
+            DICE_HISTORY_LISTENERS.remove(self)
         NSApp.terminate_(None)
 
 
@@ -3614,6 +4511,7 @@ class OverlayController(NSObject):
         self.displayDiceRollResult_(result)
 
     def displayDiceRollResult_(self, result):
+        record_dice_roll_history(result)
         self.dice_result_label.setStringValue_(result)
         self.dice_result_label.setHidden_(False)
         self.panel.orderFrontRegardless()
