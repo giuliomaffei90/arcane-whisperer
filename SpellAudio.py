@@ -55,7 +55,9 @@ try:
         NSMakeRect,
         NSMenu,
         NSMenuItem,
+        NSMutableParagraphStyle,
         NSPanel,
+        NSParagraphStyleAttributeName,
         NSPopUpButton,
         NSProgressIndicator,
         NSScrollView,
@@ -216,6 +218,40 @@ CLASS_OPTIONS = [
     "Warlock",
     "Wizard",
 ]
+CONDITION_OPTIONS = [
+    "Blinded",
+    "Charmed",
+    "Deafened",
+    "Frightened",
+    "Grappled",
+    "Incapacitated",
+    "Invisible",
+    "Paralyzed",
+    "Petrified",
+    "Poisoned",
+    "Prone",
+    "Restrained",
+    "Stunned",
+    "Unconscious",
+    "Exhaustion",
+]
+CONDITION_COLOR_VALUES = {
+    "Blinded": (0.96, 0.78, 0.28),
+    "Charmed": (0.95, 0.45, 0.78),
+    "Deafened": (0.56, 0.74, 0.96),
+    "Frightened": (1.0, 0.48, 0.36),
+    "Grappled": (0.64, 0.86, 0.42),
+    "Incapacitated": (0.78, 0.62, 0.94),
+    "Invisible": (0.52, 0.88, 0.86),
+    "Paralyzed": (0.99, 0.64, 0.28),
+    "Petrified": (0.70, 0.72, 0.74),
+    "Poisoned": (0.38, 0.82, 0.48),
+    "Prone": (0.86, 0.70, 0.46),
+    "Restrained": (0.48, 0.68, 0.96),
+    "Stunned": (1.0, 0.86, 0.32),
+    "Unconscious": (0.80, 0.50, 0.55),
+    "Exhaustion": (0.62, 0.58, 0.50),
+}
 CLASS_ICONS = {
     "Artificer": "◇",
     "Barbarian": "◈",
@@ -962,20 +998,38 @@ def attributed_spell_body(body: str):
 def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]], roll_ranges: list[tuple[int, int, str]] | None = None):
     dice_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.58, 0.95, 0.28, 1.0)
     spell_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.82, 0.26, 1.0)
+    base_font_size = 13.0
+    base_font = NSFont.systemFontOfSize_(base_font_size)
+    italic_font = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(NSFont.userFontOfSize_(base_font_size), NSItalicFontMask)
+    paragraph_style = NSMutableParagraphStyle.alloc().init()
+    paragraph_style.setLineSpacing_(2.0)
     attributes = {
-        NSFontAttributeName: NSFont.systemFontOfSize_(13),
+        NSFontAttributeName: base_font,
         NSForegroundColorAttributeName: NSColor.whiteColor(),
+        NSParagraphStyleAttributeName: paragraph_style,
     }
     attributed = NSMutableAttributedString.alloc().initWithString_attributes_(body, attributes)
+    cursor = 0
     for line in body.splitlines():
+        start = cursor
+        cursor += len(line) + 1
+        if not line:
+            continue
         if line.endswith(":"):
-            start = body.find(line)
-            if start >= 0:
-                attributed.addAttribute_value_range_(
-                    NSFontAttributeName,
-                    NSFont.boldSystemFontOfSize_(14),
-                    NSMakeRange(start, len(line)),
-                )
+            attributed.addAttribute_value_range_(
+                NSFontAttributeName,
+                NSFont.boldSystemFontOfSize_(18),
+                NSMakeRange(start, len(line)),
+            )
+            continue
+        lower_line = line.lower()
+        first_period = line.find(".")
+        if 0 < first_period <= 42 and ":" not in line[:first_period]:
+            attributed.addAttribute_value_range_(
+                NSFontAttributeName,
+                NSFont.boldSystemFontOfSize_(base_font_size),
+                NSMakeRange(start, first_period + 1),
+            )
     for start, length, _expression in (roll_ranges if roll_ranges is not None else dice_ranges_for_body(body)):
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
@@ -983,6 +1037,17 @@ def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]
             NSMakeRange(start, length),
         )
     add_colored_ranges(attributed, spell_ranges, spell_color)
+    cursor = 0
+    for line in body.splitlines():
+        start = cursor
+        cursor += len(line) + 1
+        lower_line = line.lower()
+        if "spellcaster" in lower_line and "spellcasting ability" in lower_line:
+            attributed.addAttribute_value_range_(
+                NSFontAttributeName,
+                italic_font,
+                NSMakeRange(start, len(line)),
+            )
     return attributed
 
 
@@ -1835,6 +1900,40 @@ def ui_color(red: float, green: float, blue: float, alpha: float = 1.0):
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, alpha)
 
 
+def condition_color(condition: str, alpha: float = 1.0):
+    red, green, blue = CONDITION_COLOR_VALUES.get(condition, (0.86, 0.86, 0.88))
+    return ui_color(red, green, blue, alpha)
+
+
+def normalized_conditions(combatant: dict[str, Any]) -> list[str]:
+    raw_conditions = combatant.get("conditions", [])
+    if isinstance(raw_conditions, str):
+        raw_conditions = [raw_conditions]
+    if not isinstance(raw_conditions, list):
+        return []
+    cleaned = []
+    for condition in raw_conditions:
+        name = str(condition).strip()
+        if name in CONDITION_OPTIONS and name not in cleaned:
+            cleaned.append(name)
+    return cleaned
+
+
+def combatant_is_dead(combatant: dict[str, Any]) -> bool:
+    try:
+        hp = int(str(combatant.get("hp") or "").strip())
+    except ValueError:
+        return False
+    return hp == 0
+
+
+def combatant_status_label(combatant: dict[str, Any]) -> str:
+    if combatant_is_dead(combatant):
+        return "Dead"
+    conditions = normalized_conditions(combatant)
+    return ", ".join(conditions) if conditions else "Normal"
+
+
 def style_layer(view, background=None, border=None, radius: float = 10.0, border_width: float = 1.0):
     view.setWantsLayer_(True)
     layer = view.layer()
@@ -2325,6 +2424,7 @@ class CombatTrackerView(NSView):
     current_turn_index: int
     name_rects: list[tuple[Any, int]]
     hp_button_rects: list[tuple[Any, int]]
+    status_rects: list[tuple[Any, int]]
     target: Any
     tracking_area: Any
 
@@ -2336,6 +2436,7 @@ class CombatTrackerView(NSView):
         self.current_turn_index = 0
         self.name_rects = []
         self.hp_button_rects = []
+        self.status_rects = []
         self.target = None
         self.tracking_area = None
         return self
@@ -2382,17 +2483,14 @@ class CombatTrackerView(NSView):
 
     def _hit_test(self, event) -> tuple[str, int, int | None] | None:
         point = self.convertPoint_fromView_(event.locationInWindow(), None)
+        for rect, index in self.status_rects:
+            if point_in_rect(point, rect):
+                return ("status", index, None)
         for rect, index in self.hp_button_rects:
-            if (
-                rect.origin.x <= point.x <= rect.origin.x + rect.size.width
-                and rect.origin.y <= point.y <= rect.origin.y + rect.size.height
-            ):
+            if point_in_rect(point, rect):
                 return ("hp", index, None)
         for rect, index in self.name_rects:
-            if (
-                rect.origin.x <= point.x <= rect.origin.x + rect.size.width
-                and rect.origin.y <= point.y <= rect.origin.y + rect.size.height
-            ):
+            if point_in_rect(point, rect):
                 return ("name", index, None)
         return None
 
@@ -2427,6 +2525,16 @@ class CombatTrackerView(NSView):
                     False,
                 )
             return
+        if hit is not None and hit[0] == "status":
+            _kind, index, _delta = hit
+            if self.target is not None:
+                point = self.convertPoint_fromView_(event.locationInWindow(), None)
+                self.target.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "openCombatantStatusMenu:",
+                    {"index": index, "x": float(point.x), "y": float(point.y)},
+                    False,
+                )
+            return
         if self.target is not None:
             self.target.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "closeCombatantHpMenu:",
@@ -2448,16 +2556,16 @@ class CombatTrackerView(NSView):
         temp_blue = ui_color(0.20, 0.58, 0.95, 1.0)
         pink = ui_color(1.0, 0.18, 0.39, 1.0)
         red = ui_color(0.55, 0.12, 0.18, 1.0)
+        dead_red = ui_color(0.98, 0.22, 0.30, 1.0)
         white = NSColor.whiteColor()
 
         left = 24
         width = bounds.size.width - 48
         right = left + width
-        compact = width < 820
-        badge_w = 0 if compact else 78
-        badge_x = right - badge_w - 18
+        status_w = 116 if width >= 900 else 98
+        status_x = right - status_w - 18
         ac_w = 44
-        ac_x = right - badge_w - 90
+        ac_x = status_x - ac_w - 18
         name_x = left + 132
         max_display_name = "Adult Green Dragon"
         max_name_chars = len(max_display_name)
@@ -2475,17 +2583,18 @@ class CombatTrackerView(NSView):
             draw_text("Select a party, add creatures, then start the fight.", left + 24, 66, 13, muted, False)
             self.name_rects = []
             self.hp_button_rects = []
+            self.status_rects = []
             return
 
         self.name_rects = []
         self.hp_button_rects = []
+        self.status_rects = []
         draw_text("Init", left + 30, 22, 11, muted, True)
         draw_text("Type", left + 86, 22, 11, muted, True)
         draw_text("Name", name_x, 22, 11, muted, True)
         draw_right_fitted_text_centered("HP", NSMakeRect(hp_text_x, 18, hp_text_w, 20), 11, muted, True)
         draw_centered_text_in_rect("AC", NSMakeRect(ac_x, 18, ac_w, 20), 11, muted, True)
-        if not compact:
-            draw_text("Status", badge_x + 10, 22, 11, muted, True)
+        draw_text("Status", status_x + 10, 22, 11, muted, True)
 
         row_y = 54
         row_h = 56
@@ -2495,9 +2604,15 @@ class CombatTrackerView(NSView):
             rect = NSMakeRect(left, row_y, width, row_h)
             is_current = index == self.current_turn_index
             is_down = self._hp_values(combatant)[0] is not None and self._hp_values(combatant)[0] <= 0
+            is_dead = combatant_is_dead(combatant)
+            conditions = normalized_conditions(combatant)
+            row_fill = ui_color(0.09, 0.09, 0.095, 0.62 if is_down else 1.0)
+            if conditions and not is_down:
+                tint_source = condition_color(conditions[0], 1.0)
+                row_fill = tint_source.colorWithAlphaComponent_(0.18)
             draw_rounded_rect(
                 rect,
-                ui_color(0.09, 0.09, 0.095, 0.62 if is_down else 1.0),
+                row_fill,
                 current_border if is_current else card_border,
                 8,
                 2.0 if is_current else 1.0,
@@ -2570,8 +2685,18 @@ class CombatTrackerView(NSView):
 
             draw_centered_text_in_rect(str(combatant.get("ac") or "?"), NSMakeRect(ac_x, row_y + 14, ac_w, 28), 15, white, False)
 
-            if is_down and not compact:
-                draw_text("Down", badge_x + 16, row_y + 19, 12, pink, True)
+            status_label = combatant_status_label(combatant)
+            status_color = dead_red if is_dead else condition_color(conditions[0]) if conditions else muted
+            status_rect = NSMakeRect(status_x, row_y + 14, status_w, 28)
+            self.status_rects.append((status_rect, index))
+            draw_rounded_rect(
+                status_rect,
+                ui_color(0.115, 0.115, 0.122, 0.88 if not is_down else 0.52),
+                ui_color(0.26, 0.26, 0.28, 1.0),
+                7,
+                1,
+            )
+            draw_center_fitted_text(status_label, NSMakeRect(status_x + 8, row_y + 19, status_w - 16, 18), 12, status_color, True)
 
             row_y += row_h + gap
 
@@ -2785,7 +2910,7 @@ class MainWindowController(NSObject):
         self.monster_sheet_drawer = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, height - 48))
         style_layer(self.monster_sheet_drawer, ui_color(0.055, 0.055, 0.062, 1.0), ui_color(0.18, 0.18, 0.19, 1.0), 12, 1)
         self.monster_sheet_drawer.setHidden_(True)
-        self.monster_sheet_title = make_label("", (0, 0, 260, 28), 18, True)
+        self.monster_sheet_title = make_label("", (0, 0, 260, 36), 24, True)
         self.monster_sheet_title.setUsesSingleLineMode_(True)
         self.monster_sheet_title.setLineBreakMode_(4)
         self.monster_sheet_close_button = self._make_button("Close", (0, 0, 72, 28), "closeMonsterSheet:")
@@ -3207,9 +3332,9 @@ class MainWindowController(NSObject):
             drawer_margin = 20
             drawer_inner_width = max(240, drawer_width - drawer_margin * 2)
             drawer_top = panel_height - 48
-            self.monster_sheet_title.setFrame_(NSMakeRect(drawer_margin, drawer_top, max(120, drawer_inner_width - 88), 28))
+            self.monster_sheet_title.setFrame_(NSMakeRect(drawer_margin, drawer_top - 8, max(120, drawer_inner_width - 88), 40))
             self.monster_sheet_close_button.setFrame_(NSMakeRect(drawer_width - drawer_margin - 72, drawer_top, 72, 28))
-            ability_y = panel_height - 132
+            ability_y = panel_height - 156
             ability_button_width = min(44, max(34, (drawer_inner_width - 5 * 6) / 6))
             ability_gap = (drawer_inner_width - ability_button_width * 6) / 5 if len(self.monster_sheet_ability_buttons) > 1 else 0
             for index, button in enumerate(self.monster_sheet_ability_buttons):
@@ -3893,6 +4018,7 @@ class MainWindowController(NSObject):
                     "ac": str(character.get("ac") or "?"),
                     "hp": "",
                     "initiative": initiative,
+                    "conditions": [],
                 }
             )
         self.sortCombatants()
@@ -4071,6 +4197,7 @@ class MainWindowController(NSObject):
                 "initiative": random.randint(1, 20) + ability_modifier(creature.stats[1]),
                 "cr": creature.cr,
                 "creature_name": creature.name,
+                "conditions": [],
             }
         )
         self.sortCombatants()
@@ -4190,7 +4317,11 @@ class MainWindowController(NSObject):
             damage = clean_text(entry.get("damage_dice", ""), MAX_SHORT_FIELD_CHARS)
             prefix = f"{name}. " if name else ""
             suffix = f" Damage dice: {damage}." if damage and damage not in desc else ""
-            lines.append(f"{prefix}{desc}{suffix}".strip())
+            text = f"{prefix}{desc}{suffix}".strip()
+            if text:
+                if lines and lines[-1]:
+                    lines.append("")
+                lines.append(text)
 
     def _append_spells(self, lines: list[str], spells_payload: Any):
         if not isinstance(spells_payload, list) or not spells_payload:
@@ -4200,12 +4331,16 @@ class MainWindowController(NSObject):
             if isinstance(item, str):
                 text = clean_text(item, MAX_TEXT_FIELD_CHARS)
                 if text:
+                    if lines and lines[-1]:
+                        lines.append("")
                     lines.append(text)
             elif isinstance(item, dict):
                 for key, value in item.items():
                     heading = clean_text(key, MAX_SHORT_FIELD_CHARS)
                     spell_text = clean_text(value, MAX_TEXT_FIELD_CHARS)
                     if heading or spell_text:
+                        if lines and lines[-1]:
+                            lines.append("")
                         lines.append(f"{heading}: {spell_text}".strip(": "))
 
     def _monster_body_for_creature(self, creature: Creature) -> str:
@@ -4216,7 +4351,6 @@ class MainWindowController(NSObject):
             hit_points = f"{hit_points} ({hit_dice})"
         lines = [
             f"{creature.size} {creature.creature_type}, {creature.alignment}".strip(" ,"),
-            f"Source: {creature.source or clean_text(raw.get('source', ''), MAX_SHORT_FIELD_CHARS)}",
             f"Armor Class: {display_ac(creature.ac)}",
             hit_points,
             f"Speed: {creature.speed or '-'}",
@@ -4256,6 +4390,69 @@ class MainWindowController(NSObject):
         if combatant.get("kind") != "Monster":
             return
         self.openMonsterSheetForCombatant_(combatant_index)
+
+    def openCombatantStatusMenu_(self, payload):
+        if not isinstance(payload, dict):
+            return
+        try:
+            index = int(payload.get("index"))
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(self.combatants):
+            return
+
+        combatant = self.combatants[index]
+        selected = normalized_conditions(combatant)
+        menu = NSMenu.alloc().init()
+        for condition in CONDITION_OPTIONS:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(condition, "toggleCombatantCondition:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_({"index": index, "condition": condition})
+            item.setState_(1 if condition in selected else 0)
+            menu.addItem_(item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        clear_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Clear conditions", "clearCombatantConditions:", "")
+        clear_item.setTarget_(self)
+        clear_item.setRepresentedObject_(index)
+        clear_item.setEnabled_(bool(selected))
+        menu.addItem_(clear_item)
+
+        try:
+            point = NSMakePoint(float(payload.get("x", 0)), float(payload.get("y", 0)))
+        except (TypeError, ValueError):
+            frame = self.tracker_view.bounds()
+            point = NSMakePoint(frame.size.width - 120, 40)
+        menu.popUpMenuPositioningItem_atLocation_inView_(None, point, self.tracker_view)
+
+    def toggleCombatantCondition_(self, sender):
+        payload = sender.representedObject()
+        if not isinstance(payload, dict):
+            return
+        try:
+            index = int(payload.get("index"))
+        except (TypeError, ValueError):
+            return
+        condition = str(payload.get("condition") or "").strip()
+        if index < 0 or index >= len(self.combatants) or condition not in CONDITION_OPTIONS:
+            return
+        combatant = self.combatants[index]
+        conditions = normalized_conditions(combatant)
+        if condition in conditions:
+            conditions.remove(condition)
+        else:
+            conditions.append(condition)
+        combatant["conditions"] = conditions
+        self.refreshTracker()
+
+    def clearCombatantConditions_(self, sender):
+        try:
+            index = int(sender.representedObject())
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(self.combatants):
+            return
+        self.combatants[index]["conditions"] = []
+        self.refreshTracker()
 
     def _make_hp_adjust_panel(self):
         width = 302
