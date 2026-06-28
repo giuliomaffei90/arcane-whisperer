@@ -197,6 +197,12 @@ class MainWindowController(objc.Category(_MainWindowController)):
             prefix = f"{name}. " if name else ""
             suffix = f" Damage dice: {damage}." if damage and damage not in desc else ""
             text = f"{prefix}{desc}{suffix}".strip()
+            if name and desc.endswith(":") and not suffix:
+                if lines and lines[-1]:
+                    lines.append("")
+                lines.append(f"{name}:")
+                lines.append(desc)
+                continue
             if text:
                 if lines and lines[-1]:
                     lines.append("")

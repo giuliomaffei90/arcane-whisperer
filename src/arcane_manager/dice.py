@@ -3,6 +3,7 @@ from __future__ import annotations
 from .platform import Any, dataclass, random, re
 
 DICE_PATTERN = re.compile(r"\b(\d+)d(\d+)(?:\s*([+-])\s*(\d+))?\b", flags=re.I)
+DICE_INLINE_PATTERN = re.compile(r"\b\d+d\d+(?:\s*\+\s*\d+d\d+)*(?:\s*[+-]\s*\d+)?\b", flags=re.I)
 DICE_FORMULA_PATTERN = re.compile(r"^\s*\d+d\d+(?:\s*\+\s*\d+d\d+)*(?:\s*[+-]\s*\d+)?\s*$", flags=re.I)
 
 

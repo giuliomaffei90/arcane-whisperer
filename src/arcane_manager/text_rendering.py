@@ -3,9 +3,10 @@ from __future__ import annotations
 from .platform import Any, NSMutableAttributedString, NSMutableParagraphStyle, NSFont, NSFontAttributeName, NSFontManager, NSForegroundColorAttributeName, NSItalicFontMask, NSMakeRange, NSParagraphStyleAttributeName
 from .content_links import COMPONENT_BADGE_PATTERN, dice_ranges_for_body
 from .data import Spell
-from .dice import DICE_PATTERN
 from .spell_format import component_flags, component_material
 from .ui.core import theme_color
+
+MONSTER_SECTION_HEADINGS = {"traits", "spells", "actions", "legendary actions"}
 
 def component_badge_text(components: str) -> str:
     flags = component_flags(components)
@@ -37,11 +38,11 @@ def attributed_spell_body(body: str):
             NSMakeRange(marker_start, len(marker)),
         )
 
-    for match in DICE_PATTERN.finditer(body):
+    for start, length, _expression in dice_ranges_for_body(body):
         attributed.addAttribute_value_range_(
             NSForegroundColorAttributeName,
             dice_color,
-            NSMakeRange(match.start(), match.end() - match.start()),
+            NSMakeRange(start, length),
         )
     for match in COMPONENT_BADGE_PATTERN.finditer(body):
         attributed.addAttribute_value_range_(
@@ -77,10 +78,17 @@ def attributed_monster_body(body: str, spell_ranges: list[tuple[int, int, Spell]
         cursor += len(line) + 1
         if not line:
             continue
-        if line.endswith(":"):
+        if line.rstrip(":").lower() in MONSTER_SECTION_HEADINGS:
             attributed.addAttribute_value_range_(
                 NSFontAttributeName,
                 NSFont.boldSystemFontOfSize_(18),
+                NSMakeRange(start, len(line)),
+            )
+            continue
+        if line.endswith(":") and len(line) <= 80 and "." not in line:
+            attributed.addAttribute_value_range_(
+                NSFontAttributeName,
+                NSFont.boldSystemFontOfSize_(15),
                 NSMakeRange(start, len(line)),
             )
             continue

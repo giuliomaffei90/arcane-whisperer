@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .platform import Any, re
 from .data import Spell
-from .dice import DICE_PATTERN
+from .dice import DICE_INLINE_PATTERN
 from .resources import MAX_ALIAS_CHARS, MAX_SHORT_FIELD_CHARS, MAX_TEXT_FIELD_CHARS
 from .text_utils import clean_text, normalize
 
@@ -16,7 +16,10 @@ SIGNED_BONUS_PATTERN = re.compile(r"([+-]\s*\d+)")
 
 
 def dice_ranges_for_body(body: str) -> list[tuple[int, int, str]]:
-    return [(match.start(), match.end() - match.start(), match.group(0)) for match in DICE_PATTERN.finditer(body)]
+    return [
+        (match.start(), match.end() - match.start(), re.sub(r"\s+", "", match.group(0)))
+        for match in DICE_INLINE_PATTERN.finditer(body)
+    ]
 
 
 def d20_expression_for_bonus(bonus: int) -> str:
@@ -117,6 +120,8 @@ def _entry_display_text(entry: dict[str, Any]) -> str:
     damage = clean_text(entry.get("damage_dice", ""), MAX_SHORT_FIELD_CHARS)
     prefix = f"{name}. " if name else ""
     suffix = f" Damage dice: {damage}." if damage and damage not in desc else ""
+    if name and desc.endswith(":") and not suffix:
+        return f"{name}:\n{desc}"
     return f"{prefix}{desc}{suffix}".strip()
 
 
